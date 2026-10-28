@@ -1,14 +1,17 @@
-// Motor financeiro compartilhado com o backend. Gerado a partir dos arquivos GS.
+/** Gerado a partir do domínio do backend; demonstração sem persistência. */
 /** Finanças pessoais — configuração do backend. Apps Script V8. */
 const APP_ = Object.freeze({
   // Preencha com o e-mail da conta Google que será dona da planilha.
   EMAIL_PROPRIETARIO: 'PREENCHA_SEU_EMAIL@gmail.com',
   NOME_PLANILHA: 'Minhas Financas — Banco de Dados',
-  VERSAO: '1.0.0',
-  SCHEMA: '1',
+  VERSAO: '1.2.0',
+  SCHEMA: '2',
   FUSO: 'America/Sao_Paulo',
   PROP_PLANILHA: 'FINANCAS_SPREADSHEET_ID',
-  MAX_PAYLOAD: 30000,
+  // O limite ampliado é reservado à importação; demais ações mantêm 30 mil.
+  MAX_PAYLOAD: 250000,
+  MAX_IMPORT_ITENS: 200,
+  MAX_IMPORT_PROJECOES: 1200,
   MAX_REGISTROS_POR_ABA: 50000,
   LOCK_MS: 20000
 });
@@ -17,13 +20,25 @@ const COLUNAS_ = Object.freeze({
   Configuracoes: ['chave', 'valor'],
   Contas: ['id', 'nome', 'tipo', 'saldo_inicial_centavos', 'data_saldo_inicial', 'dia_fechamento', 'dia_vencimento', 'limite_centavos', 'ativa', 'criado_em', 'atualizado_em', 'versao'],
   Categorias: ['id', 'nome', 'tipo_movimentacao', 'grupo_orcamento', 'natureza_padrao', 'cor', 'ativa', 'criado_em', 'atualizado_em', 'versao'],
-  Lancamentos: ['id', 'tipo', 'descricao', 'valor_centavos', 'categoria_id', 'natureza', 'forma_pagamento', 'conta_origem_id', 'conta_destino_id', 'meta_id', 'data_ocorrencia', 'competencia', 'data_vencimento', 'data_pagamento', 'compra_id', 'parcela_numero', 'parcelas_total', 'fatura_ref', 'status', 'recorrencia_id', 'recorrencia_ref', 'estorno_de_id', 'direcao_ajuste', 'request_id', 'criado_em', 'atualizado_em', 'versao'],
+  Lancamentos: ['id', 'tipo', 'descricao', 'valor_centavos', 'categoria_id', 'natureza', 'forma_pagamento', 'conta_origem_id', 'conta_destino_id', 'meta_id', 'data_ocorrencia', 'competencia', 'data_vencimento', 'data_pagamento', 'compra_id', 'parcela_numero', 'parcelas_total', 'fatura_ref', 'status', 'recorrencia_id', 'recorrencia_ref', 'estorno_de_id', 'direcao_ajuste', 'request_id', 'criado_em', 'atualizado_em', 'versao', 'cartao_final', 'id_parcelamento', 'importacao_hash', 'importacao_chave', 'importacao_id', 'criterio_mes', 'grupo_orcamento_importacao', 'credito_importado', 'valor_estimado', 'mes_fatura'],
   Orcamentos: ['id', 'mes', 'escopo', 'referencia_id', 'renda_base_centavos', 'percentual', 'limite_centavos', 'criado_em', 'atualizado_em', 'versao'],
   Recorrencias: ['id', 'descricao', 'tipo', 'categoria_id', 'natureza', 'conta_origem_id', 'conta_destino_id', 'forma_pagamento', 'valor_previsto_centavos', 'frequencia', 'dia_vencimento', 'data_inicio', 'data_fim', 'ativa', 'criado_em', 'atualizado_em', 'versao'],
   Metas: ['id', 'nome', 'tipo', 'valor_alvo_centavos', 'data_alvo', 'conta_id', 'valor_alocado_centavos', 'ativa', 'criado_em', 'atualizado_em', 'versao'],
   SaldosPatrimoniais: ['id', 'data', 'conta_id', 'valor_centavos', 'origem', 'observacao', 'criado_em', 'atualizado_em', 'versao'],
-  Auditoria: ['id', 'instante', 'operacao', 'entidade', 'entidade_id', 'request_id', 'versao', 'payload_hash', 'resposta_json']
+  Auditoria: ['id', 'instante', 'operacao', 'entidade', 'entidade_id', 'request_id', 'versao', 'payload_hash', 'resposta_json'],
+  Cartoes: ['id', 'final', 'apelido', 'modalidade', 'responsavel', 'conta_id', 'ativa', 'criado_em', 'atualizado_em', 'versao'],
+  Regras_Categorizacao: ['id', 'estabelecimento', 'categoria_id', 'grupo_orcamento', 'ativa', 'criado_em', 'atualizado_em', 'versao'],
+  Parcelamentos: ['id', 'cartao_final', 'descricao_base', 'data_compra', 'parcelas_total', 'valor_parcela_centavos', 'mes_primeira_fatura', 'conta_id', 'criado_em', 'atualizado_em', 'versao']
 });
+
+// Descrição imutável do único schema anterior reconhecido para migração.
+// Nunca inferir um cabeçalho por prefixo: colunas renomeadas precisam ser corrigidas.
+const COLUNAS_SCHEMA_1_ = Object.freeze(Object.keys(COLUNAS_).filter(function (n) {
+  return ['Cartoes', 'Regras_Categorizacao', 'Parcelamentos'].indexOf(n) < 0;
+}).reduce(function (mapa, nome) {
+  mapa[nome] = Object.freeze(nome === 'Lancamentos' ? COLUNAS_[nome].slice(0, 27) : COLUNAS_[nome].slice());
+  return mapa;
+}, {}));
 
 const TABELAS_EDITAVEIS_ = Object.freeze(['Contas', 'Categorias', 'Orcamentos', 'Recorrencias', 'Metas', 'SaldosPatrimoniais']);
 
@@ -53,6 +68,7 @@ function categoriasPadrao_(instante) {
     return { id: x[0], nome: x[1], tipo_movimentacao: x[2], grupo_orcamento: x[3], natureza_padrao: x[4], cor: x[5], ativa: true, criado_em: instante, atualizado_em: instante, versao: 1 };
   });
 }
+
 
 /** Regras puras de domínio. Valores monetários em centavos; datas civis ISO. */
 function erro_(code, message, details) {
@@ -266,11 +282,21 @@ function domVerificarDataContas_(r, db) {
 function domValidarFaturaPagamento_(r, db) {
   if (r.tipo !== 'transferencia') return;
   var destination = domRef_(db, 'Contas', r.conta_destino_id, true);
+  function verificarDividaReal() {
+    if (r.status !== 'confirmado') return;
+    // O histórico importado antes da âncora já estava contido no saldo de
+    // abertura. Uma fatura nominalmente aberta não autoriza pagar novamente
+    // uma dívida que foi quitada por transferência sem referência de fatura.
+    var validationDb = r.id ? Object.assign({}, db, { Lancamentos: (db.Lancamentos || []).filter(function (x) { return x.id !== r.id; }) }) : db;
+    var debt = Math.max(0, -domSaldoConta_(validationDb, destination.id, r.data_pagamento || r.data_ocorrencia));
+    if (r.valor_centavos > debt) erro_('PAGAMENTO_EXCESSIVO', 'Pagamento supera a dívida real do cartão nesta data. Concilie o saldo de abertura e os pagamentos antes de quitar a fatura.', { divida_cartao_centavos: debt });
+  }
   if (!r.fatura_ref) {
     if (destination.tipo !== 'cartao') return;
     var openingPaid=(db.Lancamentos || []).filter(function(x) { return x.status==='confirmado' && x.tipo==='transferencia' && x.conta_destino_id===destination.id && !x.fatura_ref && x.id!==r.id; }).reduce(function(s,x) { return s+x.valor_centavos; },0);
     var openingRemaining=Math.max(0,-destination.saldo_inicial_centavos-openingPaid);
     if (r.valor_centavos>openingRemaining) erro_('FATURA_OBRIGATORIA', 'Informe fatura_ref para pagar compras registradas. Sem referência só é possível pagar a dívida de abertura.', {divida_abertura_restante_centavos:openingRemaining});
+    verificarDividaReal();
     return;
   }
   if (r.tipo !== 'transferencia' || destination.tipo !== 'cartao' || !domDisponivel_(domRef_(db, 'Contas', r.conta_origem_id, true))) erro_('VALIDACAO', 'Fatura só pode ser paga por transferência de corrente/carteira para cartão.');
@@ -283,6 +309,7 @@ function domValidarFaturaPagamento_(r, db) {
     if (x.tipo === 'transferencia') paid += x.valor_centavos;
   });
   if (r.valor_centavos > Math.max(0, net - paid)) erro_('PAGAMENTO_EXCESSIVO', 'Pagamento supera o saldo confirmado desta fatura.', {saldo_centavos: Math.max(0,net-paid)});
+  verificarDividaReal();
 }
 
 /** Entrada principal de criação. Um valor total gera uma ou várias parcelas. */
@@ -361,6 +388,8 @@ function domPrepararEstorno_(r, dados, db, env) {
   if (dados.categoria_id && dados.categoria_id !== old.categoria_id) erro_('VALIDACAO', 'Estorno mantém a categoria original.');
   if (dados.conta_origem_id || (dados.conta_destino_id && dados.conta_destino_id !== old.conta_origem_id)) erro_('VALIDACAO', 'Estorno deve retornar à conta original.');
   r.conta_origem_id = ''; r.conta_destino_id = old.conta_origem_id; r.categoria_id = old.categoria_id; r.natureza = old.natureza;
+  r.cartao_final = old.cartao_final || ''; r.grupo_orcamento_importacao = old.grupo_orcamento_importacao || '';
+  r.criterio_mes = old.criterio_mes || ''; r.mes_fatura = old.mes_fatura || '';
   r.competencia = domMes_(dados.competencia || old.competencia);
   r.forma_pagamento = old.forma_pagamento === 'credito' ? 'transferencia' : old.forma_pagamento;
   r.fatura_ref = old.fatura_ref || ''; r.meta_id = '';
@@ -371,6 +400,7 @@ function confirmarLancamento_(dados, db, env) {
   var old = domRef_(db, 'Lancamentos', domId_(dados.id, 'id', true), false);
   if (dados.versao !== old.versao) erro_('CONFLITO_VERSAO', 'Este lançamento foi alterado. Atualize os dados.');
   if (old.status !== 'previsto') erro_('STATUS_INVALIDO', 'Só previsões podem ser confirmadas.');
+  if (old.importacao_id && old.valor_estimado === true) erro_('IMPORTACAO_CONFLITO', 'Confirme esta parcela pela importação da fatura correspondente, preservando o vínculo e o número da parcela.');
   var input = {};
   ['tipo','descricao','valor_centavos','categoria_id','natureza','forma_pagamento','conta_origem_id','conta_destino_id','meta_id','data_ocorrencia','competencia','data_vencimento','fatura_ref','direcao_ajuste'].forEach(function(k) { if (old[k] !== '') input[k]=old[k]; });
   input.status = 'confirmado';
@@ -448,6 +478,7 @@ function domSaldoConta_(db,id,asOf) {
   return balance;
 }
 
+
 /**
  * Relatórios puros: não escrevem dados nem usam serviços do Apps Script.
  * Todos os valores monetários são inteiros em centavos; percentuais são 0..100.
@@ -466,6 +497,7 @@ function calcularDashboard_(db, opcoes, env) {
   var despesas = 0, despesasFixas = 0, despesasVariaveis = 0, receitas = 0, aportes = 0, resgates = 0;
   var resgatesOrcamento = 0, resgatesPrevistos = 0;
   var porCategoria = {};
+  var porGrupo = {};
   var fluxo = { entradas_centavos: 0, saidas_centavos: 0, variacao_centavos: 0,
     receitas_centavos: 0, despesas_diretas_centavos: 0, aportes_centavos: 0,
     resgates_centavos: 0, pagamentos_cartao_centavos: 0, pagamentos_divida_centavos: 0,
@@ -510,6 +542,13 @@ function calcularDashboard_(db, opcoes, env) {
     var categoriaId = l.categoria_id || '__sem_categoria__';
     if (!porCategoria[categoriaId]) porCategoria[categoriaId] = { realizado: 0, previsto: 0 };
     porCategoria[categoriaId][confirmado ? 'realizado' : 'previsto'] += sinal * relNumero_(l.valor_centavos);
+    // A revisão pode atribuir uma compra específica a outro grupo sem alterar
+    // o cadastro da categoria nem reclassificar seus lançamentos anteriores.
+    var grupo = relGrupoLancamento_(l, categorias[categoriaId]);
+    if (grupo) {
+      if (!porGrupo[grupo]) porGrupo[grupo] = { realizado: 0, previsto: 0 };
+      porGrupo[grupo][confirmado ? 'realizado' : 'previsto'] += sinal * relNumero_(l.valor_centavos);
+    }
     if (confirmado && (l.tipo === 'despesa' || l.tipo === 'estorno')) {
       var despesa = sinal * relNumero_(l.valor_centavos);
       despesas += despesa;
@@ -541,10 +580,11 @@ function calcularDashboard_(db, opcoes, env) {
       grupo_orcamento: c.grupo_orcamento, realizado_centavos: valores.realizado,
       previsto_centavos: valores.previsto, limite_centavos: limite,
       alerta: relAlerta_(valores.realizado, valores.previsto, limite) });
-    if (grupos[c.grupo_orcamento]) {
-      grupos[c.grupo_orcamento].realizado_centavos += valores.realizado;
-      grupos[c.grupo_orcamento].previsto_centavos += valores.previsto;
-    }
+  });
+  Object.keys(porGrupo).forEach(function (grupo) {
+    if (!grupos[grupo]) return;
+    grupos[grupo].realizado_centavos = porGrupo[grupo].realizado;
+    grupos[grupo].previsto_centavos = porGrupo[grupo].previsto;
   });
   grupos.metas.resgates_centavos = resgatesOrcamento;
   grupos.metas.resgates_previstos_centavos = resgatesPrevistos;
@@ -571,6 +611,8 @@ function calcularDashboard_(db, opcoes, env) {
   var metas = relMetas_(db, saldos, data);
   if (metas.some(function (m) { return m.alocacao_conta_excedida; })) avisos.push('METAS_SUPERAM_SALDO_DA_CONTA');
   if (data < hoje && metas.length) avisos.push('ALOCACOES_DE_METAS_SAO_ATUAIS_SEM_HISTORICO');
+  var importacaoAviso = relAvisoImportacao_(db, data);
+  if (importacaoAviso) avisos.push(importacaoAviso.codigo);
   metas.forEach(function (m) { m.data_referencia_alocacao = hoje; });
   var evolucao = [];
   var mesFinal = data.slice(0, 7);
@@ -591,6 +633,7 @@ function calcularDashboard_(db, opcoes, env) {
     orcamento: { renda_planejada_centavos: planejamento.renda_planejada_centavos,
       planejamento_cadastrado: planejamento.planejamento_cadastrado },
     categorias: saidaCategorias, grupos: saidaGrupos, metas: metas,
+    gastos_cartoes: relGastosCartoes_(db, mes, data, contas, categorias), importacao_aviso: importacaoAviso,
     avaliacoes_patrimoniais: avaliacoes, evolucao_patrimonial: evolucao, avisos: avisos };
 }
 
@@ -604,6 +647,7 @@ function listarFaturas_(db, opcoes, env) {
     erro_('CONTA_INVALIDA', 'Selecione uma conta do tipo cartão.');
   }
   var faturas = {};
+  var vencimentosDefinidos = {};
   relLinhas_(db, 'Lancamentos').forEach(function (l) {
     if (l.status === 'cancelado' || !l.fatura_ref) return;
     var contaId = l.tipo === 'despesa' ? l.conta_origem_id : l.conta_destino_id;
@@ -622,8 +666,15 @@ function listarFaturas_(db, opcoes, env) {
         previsto_credito_centavos: 0, pagamentos_previstos_centavos: 0, parcelas: [] };
     }
     var valor = relNumero_(l.valor_centavos);
+    // O orçamento pode usar a data da compra, mas a obrigação permanece na
+    // fatura indicada por fatura_ref. Um crédito isolado também pode fornecer
+    // o vencimento explícito do PDF, desde que pertença ao mesmo ciclo.
+    if ((l.tipo === 'despesa' && l.forma_pagamento === 'credito' || l.tipo === 'estorno' && confirmado) &&
+        l.data_vencimento && l.data_vencimento.slice(0, 7) === f.mes) {
+      f.data_vencimento = vencimentosDefinidos[l.fatura_ref] ? relMinData_(f.data_vencimento, l.data_vencimento) : l.data_vencimento;
+      vencimentosDefinidos[l.fatura_ref] = true;
+    }
     if (l.tipo === 'despesa' && l.forma_pagamento === 'credito') {
-      if (l.data_vencimento) f.data_vencimento = relMinData_(f.parcelas.length ? f.data_vencimento : l.data_vencimento, l.data_vencimento);
       if (confirmado) f.total_confirmado_centavos += valor;
       else f.previsto_credito_centavos += valor;
       f.parcelas.push({ id: l.id, compra_id: l.compra_id, descricao: l.descricao,
@@ -645,7 +696,31 @@ function listarFaturas_(db, opcoes, env) {
       f.atrasada ? 'atrasada' : f.pago_centavos > 0 ? 'parcial' : 'aberta';
     return f;
   }).sort(function (a, b) { return a.data_vencimento.localeCompare(b.data_vencimento) || a.fatura_ref.localeCompare(b.fatura_ref); });
+  var dividasConfirmadas = new Map();
+  relSaldos_(db, data).contas.forEach(function (c) {
+    if (c.tipo === 'cartao') dividasConfirmadas.set(c.conta_id, Math.max(0, -c.saldo_centavos));
+  });
+  var faturasAbertas = new Map();
+  lista.forEach(function (f) {
+    f.exige_conciliacao = false;
+    faturasAbertas.set(f.conta_id, (faturasAbertas.get(f.conta_id) || 0) + f.restante_centavos);
+  });
+  var conciliacao = [];
+  faturasAbertas.forEach(function (abertas, contaId) {
+    // Sem âncora de saldo disponível nesta referência não há comparação
+    // confiável. Nunca assumir que a ausência de histórico significa saldo zero.
+    if (!dividasConfirmadas.has(contaId) || abertas <= dividasConfirmadas.get(contaId)) return;
+    conciliacao.push({ conta_id: contaId, divida_confirmada_centavos: dividasConfirmadas.get(contaId),
+      faturas_abertas_centavos: abertas,
+      mensagem: 'Há faturas abertas que superam o saldo devedor confirmado deste cartão. Confira pagamentos anteriores e o saldo inicial antes de registrar outro pagamento.' });
+    lista.forEach(function (f) {
+      if (f.conta_id !== contaId) return;
+      f.exige_conciliacao = true;
+      if (f.status === 'aberta' || f.status === 'atrasada') f.status = 'conciliar';
+    });
+  });
   return { data_referencia: data, faturas: lista,
+    conciliacao_necessaria: conciliacao,
     dividas_iniciais_sem_vencimento: relDividasIniciais_(db, data, opcoes.conta_id) };
 }
 
@@ -673,6 +748,7 @@ function calcularProjecao_(db, opcoes, env) {
   var saldosHoje = relSaldos_(db, hoje);
   var compromissos = [];
   var avisos = ['FATURAS_PROJETADAS_COM_QUITACAO_INTEGRAL', 'RECEITAS_PREVISTAS_SAO_ESTIMATIVAS'];
+  if (faturas.conciliacao_necessaria.length) avisos.push('CONCILIAR_FATURAS_E_SALDO_CARTAO');
   if (relHaRecorrenciasAntigasNaoProjetadas_(db, mesAtual)) avisos.push('RECORRENCIAS_ANTIGAS_NAO_PROJETADAS');
   if (faturas.faturas.some(function (f) { return f.saldo_credor_centavos > 0; }) ||
       saldosHoje.contas.some(function (c) { return c.tipo === 'cartao' && c.saldo_centavos > 0; })) {
@@ -776,6 +852,105 @@ function relDiaMes_(mes, dia) {
 }
 function relMinData_(a, b) { return a < b ? a : b; }
 function relOperacional_(conta) { return !!conta && (conta.tipo === 'corrente' || conta.tipo === 'carteira'); }
+
+function relGrupoLancamento_(l, categoria) {
+  var grupos = ['necessidades', 'desejos', 'metas'];
+  // Estornos manuais vinculados à compra herdam a mesma classificação.
+  if ((l.importacao_id || l.tipo === 'estorno' && l.estorno_de_id) && grupos.indexOf(l.grupo_orcamento_importacao) >= 0) return l.grupo_orcamento_importacao;
+  return categoria && grupos.indexOf(categoria.grupo_orcamento) >= 0 ? categoria.grupo_orcamento : '';
+}
+
+/** Despesas de cartão por competência, preservando caixa e KPIs globais. */
+function relGastosCartoes_(db, mes, data, contas, categorias) {
+  var porFinal = {}, porConta = {};
+  relLinhas_(db, 'Cartoes').forEach(function (c) {
+    if (!/^\d{4}$/.test(c.final || '')) return;
+    porFinal[c.final] = c;
+    if (!porConta[c.conta_id]) porConta[c.conta_id] = [];
+    if (!porConta[c.conta_id].some(function (x) { return x.final === c.final; })) porConta[c.conta_id].push(c);
+  });
+  var grupos = {};
+  relLinhas_(db, 'Lancamentos').forEach(function (l) {
+    if (l.status === 'cancelado' || l.competencia !== mes) return;
+    var despesa = l.tipo === 'despesa' && l.forma_pagamento === 'credito';
+    var estorno = l.tipo === 'estorno';
+    var contaId = despesa ? l.conta_origem_id : estorno ? l.conta_destino_id : '';
+    if (!contas[contaId] || contas[contaId].tipo !== 'cartao') return;
+    var confirmado = l.status === 'confirmado';
+    var efeito = relDataEfeito_(l, contas);
+    if (confirmado && (!efeito || efeito > data)) return;
+    var final = /^\d{4}$/.test(l.cartao_final || '') ? l.cartao_final : '';
+    if (!final && porConta[contaId] && porConta[contaId].length === 1) final = porConta[contaId][0].final;
+    var cadastro = final && porFinal[final] && porFinal[final].conta_id === contaId ? porFinal[final] : null;
+    var chave = contaId + ':' + final;
+    if (!grupos[chave]) grupos[chave] = {
+      final: final, apelido: cadastro ? cadastro.apelido : final ? 'Cartão final ' + final : 'Cartão sem final identificado',
+      modalidade: cadastro ? cadastro.modalidade : '', responsavel: cadastro ? cadastro.responsavel : '',
+      conta_id: contaId, realizado_centavos: 0, previsto_centavos: 0, categorias: {},
+    };
+    var grupo = grupos[chave];
+    var valor = (estorno ? -1 : 1) * relNumero_(l.valor_centavos);
+    var campo = confirmado ? 'realizado_centavos' : 'previsto_centavos';
+    grupo[campo] += valor;
+    var categoriaId = l.categoria_id || '__sem_categoria__';
+    if (!grupo.categorias[categoriaId]) grupo.categorias[categoriaId] = {
+      categoria_id: categoriaId, nome: categorias[categoriaId] ? categorias[categoriaId].nome : 'Sem categoria',
+      realizado_centavos: 0, previsto_centavos: 0,
+    };
+    grupo.categorias[categoriaId][campo] += valor;
+  });
+  return Object.keys(grupos).sort().map(function (chave) {
+    var grupo = grupos[chave];
+    grupo.categorias = Object.keys(grupo.categorias).sort().map(function (id) { return grupo.categorias[id]; });
+    return grupo;
+  });
+}
+
+/** Estimativas da importação continuam separadas dos saldos confirmados. */
+function relAvisoImportacao_(db, data) {
+  var lancamentos = relLinhas_(db, 'Lancamentos');
+  var parcelas = lancamentos.filter(function (l) {
+    return l.status === 'previsto' && l.tipo === 'despesa' && l.forma_pagamento === 'credito' &&
+      l.importacao_id && relAtivo_(l.valor_estimado);
+  });
+  // Mesmo sem opt-in de projeção, a parcela 02/06 revela uma série conhecida.
+  // Avisar sobre os ordinais restantes não cria despesas ou altera o saldo.
+  var porSerie = new Map();
+  lancamentos.forEach(function (l) {
+    var id = l.id_parcelamento || l.compra_id;
+    if (!id || l.status === 'cancelado' || l.tipo !== 'despesa' || l.forma_pagamento !== 'credito') return;
+    if (!porSerie.has(id)) porSerie.set(id, []);
+    porSerie.get(id).push(l);
+  });
+  var naoProjetadas = 0, valorNaoProjetado = 0;
+  relLinhas_(db, 'Parcelamentos').forEach(function (serie) {
+    var total = relNumero_(serie.parcelas_total), valor = relNumero_(serie.valor_parcela_centavos);
+    if (!Number.isSafeInteger(total) || total < 2 || !Number.isSafeInteger(valor) || valor <= 0) return;
+    var registros = (porSerie.get(serie.id) || []).filter(function (l) { return l.conta_origem_id === serie.conta_id; });
+    var ultima = 0;
+    var registrados = new Set();
+    registros.forEach(function (l) {
+      var numero = relNumero_(l.parcela_numero);
+      if (!Number.isSafeInteger(numero) || numero < 1 || numero > total) return;
+      registrados.add(numero);
+      if (l.status === 'confirmado' && l.data_ocorrencia && l.data_ocorrencia <= data) ultima = Math.max(ultima, numero);
+    });
+    if (!ultima) return;
+    for (var n = ultima + 1; n <= total; n++) {
+      if (!registrados.has(n)) { naoProjetadas++; valorNaoProjetado += valor; }
+    }
+  });
+  if (!parcelas.length && !naoProjetadas) return null;
+  return {
+    codigo: 'PARCELAS_IMPORTADAS_ESTIMADAS_FORA_DO_PATRIMONIO',
+    mensagem: 'Há parcelas futuras estimadas ou não projetadas fora do patrimônio confirmado. Confira as séries e o saldo total do cartão; os valores não projetados ainda não aparecem nas previsões.',
+    parcelas_estimadas: parcelas.length,
+    valor_estimado_centavos: parcelas.reduce(function (total, l) { return total + relNumero_(l.valor_centavos); }, 0),
+    parcelas_nao_projetadas: naoProjetadas,
+    valor_nao_projetado_estimado_centavos: valorNaoProjetado,
+    incluidas_no_saldo: false,
+  };
+}
 
 function relDataEfeito_(l, contas) {
   var origem = contas[l.conta_origem_id];
@@ -960,4 +1135,345 @@ function relHaRecorrenciasAntigasNaoProjetadas_(db, mesAtual) {
   });
 }
 
-export { normalizarEntidade_, criarLancamentos_, confirmarLancamento_, cancelarLancamento_, gerarRecorrencias_, calcularDashboard_, calcularProjecao_, listarFaturas_, categoriasPadrao_, configuracoesPadrao_ };
+
+/**
+ * Importação de fatura: valida e prepara um lote SEM executar I/O ou alterar db.
+ * A API chama esta função sob ScriptLock e grava mudanças + recibo atomicamente.
+ * A entrada usa centavos COM sinal; Lancamentos mantém o contrato positivo/tipo.
+ */
+function impNormalizar_(value) {
+  return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+}
+function impEstabelecimento_(value) {
+  return impNormalizar_(value).replace(/^(?:ESTORNO|DEVOLUCAO|REEMBOLSO)(?: DE| DA)?\s*[:*\-]?\s+/u, '')
+    .replace(/(?:^|\s)(\d{1,2})\s*\/\s*(\d{1,2})(?=\s|$)/g, function (whole, current, total) {
+      return Number(total) > 1 && Number(current) > 0 && Number(current) <= Number(total) ? ' ' : whole;
+    }).replace(/\s+/g, ' ').trim();
+}
+function impHash_(parts, env) {
+  var text = JSON.stringify(parts);
+  if (env && typeof env.hash === 'function') return env.hash(text);
+  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, text, Utilities.Charset.UTF_8);
+  return bytes.map(function (b) { return ('0' + ((b + 256) % 256).toString(16)).slice(-2); }).join('');
+}
+function impPagamento_(description) {
+  return /\b(?:PAGAMENTO (?:EFETUADO|RECEBIDO|DE FATURA|DA FATURA)|DEBITO AUTOMATICO(?: DE| DA)? FATURA|PGTO(?: DE| DA)? FATURA|PAGTO(?: DE| DA)? FATURA)\b/u.test(impNormalizar_(description));
+}
+function impAssinado_(row) { return row.tipo === 'estorno' ? -row.valor_centavos : row.valor_centavos; }
+function impConta_(row) { return row.tipo === 'estorno' ? row.conta_destino_id : row.conta_origem_id; }
+function impMesFatura_(row) {
+  var ref = /:(\d{4}-\d{2})$/.exec(row.fatura_ref || '');
+  return row.mes_fatura || (ref && ref[1]) || (row.data_vencimento || '').slice(0, 7);
+}
+function impParcela_(row) { return Number.isSafeInteger(row.parcela_numero) && row.parcela_numero > 0 ? row.parcela_numero : 1; }
+function impAssinatura_(row, signed, final) {
+  return [row.data_ocorrencia || row.data_compra, impEstabelecimento_(row.descricao), signed,
+    final || row.cartao_final || '', row.mes_fatura || impMesFatura_(row), impParcela_(row)];
+}
+function impConflito_(message, id) {
+  erro_('IMPORTACAO_CONFLITO', message, id ? { id_cliente: id } : undefined);
+}
+function impLista_(value, name, max, optional) {
+  if (optional && value === undefined) return [];
+  if (!Array.isArray(value) || value.length > max) erro_('LIMITE_LOTE', 'Lista inválida ou grande demais: ' + name);
+  return value;
+}
+function impBool_(value, name) {
+  if (value === undefined) return false;
+  if (typeof value !== 'boolean') erro_('VALIDACAO', name + ' deve ser booleano.');
+  return value;
+}
+
+function importarLote_(dados, db, env) {
+  domObj_(dados, ['confirmado', 'vencimento', 'criterio_mes', 'cartoes', 'lancamentos']);
+  if (dados.confirmado !== true) erro_('IMPORTACAO_NAO_CONFIRMADA', 'Confirme a revisão antes de salvar a fatura.');
+  var vencimento = domData_(dados.vencimento, 'vencimento');
+  var criterion = domEnum_(dados.criterio_mes, 'criterio_mes', ['vencimento', 'compra']);
+  var month = vencimento.slice(0, 7);
+  var inputs = impLista_(dados.lancamentos, 'lancamentos', APP_.MAX_IMPORT_ITENS || 200);
+  if (!inputs.length) erro_('VALIDACAO', 'Selecione pelo menos um lançamento.');
+  var cardInputs = impLista_(dados.cartoes, 'cartoes', 200, true);
+  var changes = [], changeMap = new Map(), idClientes = new Set();
+  var cardRows = (db.Cartoes || []).map(function (r) { return Object.assign({}, r); });
+  var seriesRows = (db.Parcelamentos || []).map(function (r) { return Object.assign({}, r); });
+  var originalSeries = (db.Parcelamentos || []).slice();
+  var transactionRows = (db.Lancamentos || []).slice();
+  var rules = (db.Regras_Categorizacao || []).slice();
+  var receipt = { importacao_id: env.requestId || env.uuid(), quantidade: inputs.length, inseridos: 0,
+    reconciliados: 0, ignorados: 0, projetados: 0, regras_salvas: 0, cartoes_salvos: 0, metadados_atualizados: 0, ids: [] };
+  function stage(table, row) {
+    var key = table + ':' + row.id;
+    if (changeMap.has(key)) changes[changeMap.get(key)] = { tabela: table, registro: row };
+    else { changeMap.set(key, changes.length); changes.push({ tabela: table, registro: row }); }
+    return row;
+  }
+  function metadata(row, previous) { return domMeta_(row, previous || null, env); }
+
+  // Nenhum final pode ser religado silenciosamente a outra conta já movimentada.
+  var seenCards = new Set();
+  cardInputs.forEach(function (v) {
+    domObj_(v, ['final', 'apelido', 'modalidade', 'responsavel', 'conta_id']);
+    var final = domTexto_(v.final, 'final', true, 4);
+    if (!/^\d{4}$/.test(final) || seenCards.has(final)) erro_('VALIDACAO', 'Informe finais de cartão únicos com quatro dígitos.');
+    seenCards.add(final);
+    var accountId = domId_(v.conta_id, 'conta_id', true), account = domRef_(db, 'Contas', accountId, true);
+    domTipoConta_(account, ['cartao'], 'conta do cartão');
+    var found = cardRows.filter(function (c) { return c.final === final; });
+    if (found.length > 1) erro_('BANCO_INCONSISTENTE', 'Final duplicado em Cartoes.');
+    var previous = found[0];
+    if (previous && previous.conta_id !== accountId && transactionRows.some(function (l) { return l.cartao_final === final; })) impConflito_('O final já tem lançamentos em outra conta. Corrija o vínculo antes de importar.');
+    var card = { id: previous ? previous.id : env.uuid(), final: final,
+      apelido: (v.apelido === undefined && previous ? previous.apelido : domTexto_(v.apelido, 'apelido', false, 100)) || 'Cartão ' + final,
+      modalidade: domEnum_(v.modalidade, 'modalidade', ['fisico', 'virtual', 'adicional'], previous ? previous.modalidade : 'fisico'),
+      responsavel: v.responsavel === undefined && previous ? previous.responsavel : domTexto_(v.responsavel, 'responsavel', false, 100), conta_id: accountId, ativa: true };
+    var same = previous && ['final', 'apelido', 'modalidade', 'responsavel', 'conta_id', 'ativa'].every(function (k) { return card[k] === previous[k]; });
+    if (!same) {
+      card = metadata(card, previous); stage('Cartoes', card); receipt.cartoes_salvos++;
+      if (previous) cardRows[cardRows.indexOf(previous)] = card; else cardRows.push(card);
+    }
+  });
+  var cardMap = new Map();
+  cardRows.forEach(function (c) {
+    if (cardMap.has(c.final)) erro_('BANCO_INCONSISTENTE', 'Final duplicado em Cartoes.');
+    cardMap.set(c.final, c);
+  });
+  var current = inputs.map(function (v) {
+    domObj_(v, ['id_cliente', 'data_compra', 'descricao', 'valor_centavos', 'categoria_id', 'grupo_orcamento', 'cartao_final', 'parcela_numero', 'parcelas_total', 'id_parcelamento', 'projetar', 'aprender', 'duplicidade_revisada', 'ocorrencia']);
+    var id = domId_(v.id_cliente, 'id_cliente', true);
+    if (idClientes.has(id)) erro_('VALIDACAO', 'Identificador de linha repetido.');
+    idClientes.add(id);
+    var description = domTexto_(v.descricao, 'descricao', true, 500);
+    if (impPagamento_(description)) erro_('VALIDACAO', 'Pagamento de fatura não é lançamento de consumo: desmarque esta linha.', { id_cliente: id });
+    var amount = v.valor_centavos;
+    if (!Number.isSafeInteger(amount) || amount === 0 || Math.abs(amount) > 9000000000000) erro_('VALIDACAO', 'Valor inválido da linha.', { id_cliente: id });
+    if (amount > 0 && /^(?:ESTORNO|CREDITO|CREDITOS|DESCONTO|CASHBACK|DEVOLUCAO|REEMBOLSO)\b/.test(impNormalizar_(description))) erro_('VALIDACAO', 'Crédito/estorno deve ter valor negativo.', { id_cliente: id });
+    var date = domData_(v.data_compra, 'data_compra');
+    if (date > env.today || date > vencimento) erro_('DATA_FUTURA', 'A compra deve ter ocorrido até hoje e até o vencimento.', { id_cliente: id });
+    var final = domTexto_(v.cartao_final, 'cartao_final', true, 4);
+    if (!/^\d{4}$/.test(final)) erro_('VALIDACAO', 'Final do cartão inválido.', { id_cliente: id });
+    var card = cardMap.get(final);
+    if (!card || card.ativa === false) erro_('REFERENCIA_INVALIDA', 'Vincule o final ' + final + ' a uma conta de cartão ativa.');
+    var account = domRef_(db, 'Contas', card.conta_id, true); domTipoConta_(account, ['cartao'], 'conta do cartão');
+    var categoryId = domId_(v.categoria_id, 'categoria_id', true), category = domRef_(db, 'Categorias', categoryId, true);
+    if (category.tipo_movimentacao !== 'despesa') erro_('CATEGORIA_INCOMPATIVEL', 'Escolha uma categoria de despesa.', { id_cliente: id });
+    var group = domEnum_(v.grupo_orcamento, 'grupo_orcamento', ['necessidades', 'desejos', 'metas']);
+    var n = 1, total = 1;
+    if (v.parcelas_total !== undefined && v.parcelas_total !== null && v.parcelas_total !== '') {
+      total = domInt_(v.parcelas_total, 'parcelas_total', 2, 99);
+      n = domInt_(v.parcela_numero, 'parcela_numero', 1, total);
+    } else if (v.parcela_numero !== undefined && v.parcela_numero !== null && v.parcela_numero !== '') erro_('VALIDACAO', 'Parcela sem total.');
+    var project = impBool_(v.projetar, 'projetar'), learn = impBool_(v.aprender, 'aprender');
+    impBool_(v.duplicidade_revisada, 'duplicidade_revisada');
+    if (project && (total === 1 || amount < 0 || n === total)) erro_('VALIDACAO', 'Não há parcelas futuras válidas nesta linha.');
+    var seriesId = domId_(v.id_parcelamento, 'id_parcelamento', false);
+    if (seriesId && total === 1) erro_('VALIDACAO', 'Compra à vista não recebe parcelamento.');
+    // Ordinal da linha entre TODOS os itens iguais da revisão, não somente os
+    // selecionados. Isso permite importar duas compras legítimas em lotes separados.
+    var occurrenceOrdinal = v.ocorrencia === undefined ? null : domInt_(v.ocorrencia, 'ocorrencia', 1, 50000);
+    return { id_cliente: id, data_compra: date, descricao: description, descricao_base: impEstabelecimento_(description),
+      valor_centavos: amount, categoria_id: categoryId, categoria: category, grupo_orcamento: group,
+      cartao_final: final, conta_id: card.conta_id, parcela_numero: n, parcelas_total: total,
+      id_parcelamento: seriesId, projetar: project, aprender: learn, mes_fatura: month, ocorrencia: occurrenceOrdinal };
+  });
+  var futureCount = current.reduce(function (n, r) { return n + (r.projetar ? r.parcelas_total - r.parcela_numero : 0); }, 0);
+  if (futureCount > (APP_.MAX_IMPORT_PROJECOES || 1200)) erro_('LIMITE_PROJECAO', 'Reduza as parcelas futuras deste lote.');
+  var sum = current.reduce(function (n, r) { return n + Math.abs(r.valor_centavos); }, 0);
+  if (!Number.isSafeInteger(sum)) erro_('VALIDACAO', 'Total fora do limite permitido.');
+  var exposure = current.reduce(function (n, r) { return n + Math.abs(r.valor_centavos) * (1 + (r.projetar ? r.parcelas_total - r.parcela_numero : 0)); }, 0);
+  if (!Number.isSafeInteger(exposure)) erro_('VALIDACAO', 'O total das parcelas ultrapassa o limite de centavos exatos.');
+
+  // Índices do estado inicial + consumo por ocorrência: duas compras iguais
+  // legítimas usam ordinais distintos, sem eliminar ambas por um Set de hashes.
+  var strong = new Map(), consumed = new Set(), occurrence = new Map(), occurrenceKeys = new Set(), usedSeries = new Set();
+  transactionRows.forEach(function (r) {
+    if (r.importacao_chave) {
+      if (strong.has(r.importacao_chave)) erro_('BANCO_INCONSISTENTE', 'Chave de importação duplicada no banco.');
+      strong.set(r.importacao_chave, r);
+    }
+  });
+  function sameRowBase(existing, item, includeValue) {
+    if (['despesa', 'estorno'].indexOf(existing.tipo) < 0 || impConta_(existing) !== item.conta_id || existing.data_ocorrencia !== item.data_compra) return false;
+    if (existing.cartao_final && existing.cartao_final !== item.cartao_final) return false;
+    if (impEstabelecimento_(existing.descricao) !== item.descricao_base || impParcela_(existing) !== item.parcela_numero || impMesFatura_(existing) !== month) return false;
+    if ((existing.tipo === 'estorno') !== (item.valor_centavos < 0)) return false;
+    return !includeValue || impAssinado_(existing) === item.valor_centavos;
+  }
+  function legacyMatches(item, includeValue, status) {
+    var candidates = transactionRows.filter(function (r) { return !consumed.has(r.id) && (!status || r.status === status) && sameRowBase(r, item, includeValue); });
+    if (item.id_parcelamento && item.parcelas_total > 1 && item.valor_centavos > 0) {
+      var knownId = seriesRows.some(function (s) { return s.id === item.id_parcelamento; }) || transactionRows.some(function (r) { return (r.id_parcelamento || r.compra_id) === item.id_parcelamento; });
+      if (knownId) return candidates.filter(function (r) { return (r.id_parcelamento || r.compra_id) === item.id_parcelamento; });
+      // Um UUID novo fornecido pelo cliente não resolve duas previsões antigas.
+      if (candidates.length > 1) impConflito_('A série informada não identifica as previsões existentes. Selecione o vínculo correto.', item.id_cliente);
+    }
+    return candidates;
+  }
+  function replaceTransaction(row, previous) {
+    if (previous) {
+      var index = transactionRows.findIndex(function (r) { return r.id === previous.id; });
+      if (index >= 0) transactionRows[index] = row;
+    } else transactionRows.push(row);
+    stage('Lancamentos', row);
+    return row;
+  }
+  function seriesMatches(series, item, firstMonth) {
+    return series.cartao_final === item.cartao_final && series.conta_id === item.conta_id && series.data_compra === item.data_compra &&
+      impEstabelecimento_(series.descricao_base) === item.descricao_base && series.parcelas_total === item.parcelas_total && series.mes_primeira_fatura === firstMonth;
+  }
+  function resolveSeries(item, matched) {
+    if (item.parcelas_total === 1 || item.valor_centavos < 0) return null;
+    var firstMonth = domMes_(domSomarMes_(month, -(item.parcela_numero - 1)));
+    if (matched && Number.isSafeInteger(matched.parcelas_total) && matched.parcelas_total !== item.parcelas_total) impConflito_('O total de parcelas difere da compra já cadastrada.', item.id_cliente);
+    var knownId = matched && (matched.id_parcelamento || matched.compra_id);
+    var id = knownId || item.id_parcelamento;
+    var previous = id && seriesRows.find(function (s) { return s.id === id; });
+    if (previous && !seriesMatches(previous, item, firstMonth)) impConflito_('A série informada pertence a outra compra ou ciclo.', item.id_cliente);
+    if (id && !previous) {
+      var legacyReferences = transactionRows.filter(function (r) { return (r.id_parcelamento || r.compra_id) === id && r.tipo === 'despesa'; });
+      if (legacyReferences.some(function (r) {
+        return impConta_(r) !== item.conta_id || r.data_ocorrencia !== item.data_compra ||
+          (r.cartao_final && r.cartao_final !== item.cartao_final) || impEstabelecimento_(r.descricao) !== item.descricao_base ||
+          r.parcelas_total !== item.parcelas_total || domSomarMes_(impMesFatura_(r), -(impParcela_(r) - 1)) !== firstMonth;
+      })) impConflito_('O identificador legado pertence a outra compra ou ciclo.', item.id_cliente);
+    }
+    if (!previous && !knownId) {
+      var possible = originalSeries.filter(function (s) { return seriesMatches(s, item, firstMonth) && !usedSeries.has(s.id + ':' + item.parcela_numero); });
+      if (possible.length > 1 && !id) impConflito_('Há mais de um parcelamento compatível. Selecione o vínculo correto antes de importar.', item.id_cliente);
+      if (!id && possible.length === 1) { previous = possible[0]; id = previous.id; }
+    }
+    if (id && usedSeries.has(id + ':' + item.parcela_numero)) impConflito_('A mesma parcela foi vinculada duas vezes à série.', item.id_cliente);
+    if (!id) id = env.uuid();
+    var row = { id: id, cartao_final: item.cartao_final, descricao_base: item.descricao_base,
+      data_compra: item.data_compra, parcelas_total: item.parcelas_total, valor_parcela_centavos: Math.abs(item.valor_centavos),
+      mes_primeira_fatura: firstMonth, conta_id: item.conta_id };
+    if (!previous) {
+      row = metadata(row, null); seriesRows.push(row); stage('Parcelamentos', row);
+    } else {
+      // Só o valor observado desta parcela muda; a identidade/ciclo é preservada.
+      if (previous.valor_parcela_centavos !== row.valor_parcela_centavos) {
+        row = metadata(row, previous); seriesRows[seriesRows.findIndex(function (s) { return s.id === previous.id; })] = row; stage('Parcelamentos', row);
+      } else row = previous;
+    }
+    usedSeries.add(id + ':' + item.parcela_numero);
+    return row;
+  }
+  function createTransaction(item, due, n, status, series, hash, key, previous) {
+    var row = domBlankLancamento_();
+    row.tipo = item.valor_centavos < 0 ? 'estorno' : 'despesa'; row.descricao = item.descricao;
+    row.valor_centavos = Math.abs(item.valor_centavos); row.categoria_id = item.categoria_id;
+    row.natureza = /\bIOF\b/.test(impNormalizar_(item.descricao)) ? 'variavel' : domEnum_(item.categoria.natureza_padrao, 'natureza da categoria', ['fixa', 'variavel'], 'variavel');
+    row.forma_pagamento = row.tipo === 'estorno' ? 'transferencia' : 'credito';
+    row.conta_origem_id = row.tipo === 'despesa' ? item.conta_id : '';
+    row.conta_destino_id = row.tipo === 'estorno' ? item.conta_id : '';
+    row.data_ocorrencia = item.data_compra; row.competencia = criterion === 'compra' ? item.data_compra.slice(0, 7) : due.slice(0, 7);
+    row.data_vencimento = due; row.data_pagamento = ''; row.status = status;
+    row.compra_id = series ? series.id : previous && previous.compra_id || env.uuid();
+    row.parcela_numero = n; row.parcelas_total = item.parcelas_total; row.fatura_ref = item.conta_id + ':' + due.slice(0, 7);
+    row.cartao_final = item.cartao_final; row.id_parcelamento = series ? series.id : '';
+    row.importacao_hash = hash; row.importacao_chave = key; row.importacao_id = receipt.importacao_id;
+    row.criterio_mes = criterion; row.grupo_orcamento_importacao = item.grupo_orcamento;
+    row.credito_importado = row.tipo === 'estorno'; row.valor_estimado = status === 'previsto'; row.mes_fatura = due.slice(0, 7);
+    row.request_id = env.requestId || '';
+    if (previous && previous.estorno_de_id) row.estorno_de_id = previous.estorno_de_id;
+    return metadata(row, previous);
+  }
+  var learning = new Map();
+  current.forEach(function (item) {
+    if (item.id_parcelamento && item.parcelas_total > 1 && item.valor_centavos > 0) {
+      var requestedSeries = seriesRows.find(function (s) { return s.id === item.id_parcelamento; });
+      if (requestedSeries && !seriesMatches(requestedSeries, item, domSomarMes_(month, -(item.parcela_numero - 1)))) impConflito_('A série informada pertence a outra compra ou ciclo.', item.id_cliente);
+    }
+    var hash = impHash_([item.data_compra, item.descricao_base, item.valor_centavos], env);
+    var base = JSON.stringify([hash, item.cartao_final, month, item.parcela_numero]);
+    var sequentialOrdinal = (occurrence.get(base) || 0) + 1;
+    var ordinal = item.ocorrencia === null ? sequentialOrdinal : item.ocorrencia;
+    occurrence.set(base, Math.max(sequentialOrdinal, ordinal));
+    var occurrenceKey = base + ':' + ordinal;
+    if (occurrenceKeys.has(occurrenceKey)) erro_('VALIDACAO', 'A mesma ocorrência foi selecionada mais de uma vez.', { id_cliente: item.id_cliente });
+    occurrenceKeys.add(occurrenceKey);
+    var key = impHash_([hash, item.cartao_final, month, item.parcela_numero, ordinal], env);
+    var exact = strong.get(key), matched = exact;
+    if (exact && item.id_parcelamento && (exact.id_parcelamento || exact.compra_id) && (exact.id_parcelamento || exact.compra_id) !== item.id_parcelamento && seriesRows.some(function (s) { return s.id === item.id_parcelamento; })) impConflito_('O vínculo escolhido difere da ocorrência já importada. Confira a série antes de continuar.', item.id_cliente);
+    if (exact && exact.status === 'cancelado') impConflito_('O item já foi importado e cancelado. Resolva o cancelamento antes de reinserir.', item.id_cliente);
+    if (!matched) {
+      var legacy = legacyMatches(item, true).filter(function (r) { return !r.importacao_chave || r.status === 'previsto'; });
+      var confirmed = legacy.filter(function (r) { return r.status === 'confirmado'; });
+      if (confirmed.length) matched = confirmed[0];
+      else {
+        var forecast = legacy.filter(function (r) { return r.status === 'previsto'; });
+        if (forecast.length === 1) matched = forecast[0];
+        else if (forecast.length > 1) impConflito_('Há previsões indistinguíveis para esta parcela. Revise os vínculos.', item.id_cliente);
+        else if (legacy.some(function (r) { return r.status === 'cancelado'; })) impConflito_('O lançamento correspondente já está cancelado. Resolva o cancelamento antes de reinserir.', item.id_cliente);
+      }
+    }
+    if (!matched) {
+      // Preserve a identidade de uma previsão legada mesmo se o valor observado
+      // na fatura tiver ajuste de centavos em relação à estimativa.
+      var varyingForecasts = legacyMatches(item, false, 'previsto');
+      if (varyingForecasts.length === 1) matched = varyingForecasts[0];
+      else if (varyingForecasts.length > 1) impConflito_('Previsões ambíguas com outro valor. Confira antes de importar.', item.id_cliente);
+    }
+    var series = resolveSeries(item, matched);
+    if (!matched && series) {
+      var seriesMatchesRows = transactionRows.filter(function (r) { return !consumed.has(r.id) && (r.id_parcelamento || r.compra_id) === series.id && impParcela_(r) === item.parcela_numero && (r.tipo === 'despesa') && impMesFatura_(r) === month; });
+      if (seriesMatchesRows.length > 1) impConflito_('Mais de um lançamento para a mesma parcela.', item.id_cliente);
+      matched = seriesMatchesRows[0];
+    }
+    if (matched && matched.status === 'cancelado') impConflito_('A parcela já está cancelada. Resolva o cancelamento antes de confirmar.', item.id_cliente);
+    if (matched && matched.status === 'confirmado') {
+      if (!sameRowBase(matched, item, true)) impConflito_('O valor ou a identidade de uma parcela já confirmada mudou. Corrija o registro existente.', item.id_cliente);
+      if (matched.data_vencimento !== vencimento) erro_('VENCIMENTO_FATURA_DIVERGENTE', 'O lançamento existente possui outro vencimento confirmado.');
+      // Vincular um lançamento manual já registrado não cria outra despesa nem
+      // aplica a categoria/competência escolhida para a linha duplicada. Apenas
+      // preenche os metadados que faltavam para a próxima importação e filtros.
+      var enrichment = { cartao_final: item.cartao_final, importacao_hash: hash, importacao_chave: key,
+        importacao_id: matched.importacao_id || receipt.importacao_id, mes_fatura: month };
+      if (series) enrichment.id_parcelamento = series.id;
+      var missingMetadata = Object.keys(enrichment).some(function (field) { return matched[field] !== enrichment[field]; });
+      if (missingMetadata) {
+        var enriched = metadata(Object.assign({}, matched, enrichment, { request_id: env.requestId || '' }), matched);
+        replaceTransaction(enriched, matched); strong.set(key, enriched); receipt.metadados_atualizados++;
+      }
+      consumed.add(matched.id); receipt.ignorados++; receipt.ids.push(matched.id);
+    } else {
+      var conflictingDue = transactionRows.some(function (r) { return r.id !== (matched && matched.id) && r.status === 'confirmado' && ['despesa', 'estorno'].indexOf(r.tipo) >= 0 && r.fatura_ref === item.conta_id + ':' + month && r.data_vencimento !== vencimento; });
+      if (conflictingDue) erro_('VENCIMENTO_FATURA_DIVERGENTE', 'A fatura já possui outro vencimento confirmado.');
+      var row = createTransaction(item, vencimento, item.parcela_numero, 'confirmado', series, hash, key, matched);
+      replaceTransaction(row, matched); strong.set(key, row); consumed.add(row.id); receipt.ids.push(row.id);
+      if (matched) receipt.reconciliados++; else receipt.inseridos++;
+    }
+    if (item.projetar && series) {
+      for (var n = item.parcela_numero + 1; n <= item.parcelas_total; n++) {
+        var due = domDiaMes_(domMes_(domSomarMes_(month, n - item.parcela_numero)), Number(vencimento.slice(8, 10)));
+        var oldRows = transactionRows.filter(function (r) { return (r.id_parcelamento || r.compra_id) === series.id && impParcela_(r) === n && r.tipo === 'despesa'; });
+        if (oldRows.length > 1) impConflito_('Há mais de uma previsão para uma parcela futura.', item.id_cliente);
+        var old = oldRows[0];
+        if (old && (old.status === 'confirmado' || old.status === 'cancelado')) continue;
+        var projectedHash = hash;
+        var projectedKey = impHash_(['parcela_prevista', series.id, n], env);
+        var futureItem = Object.assign({}, item, { descricao: item.descricao_base });
+        var future = createTransaction(futureItem, due, n, 'previsto', series, projectedHash, projectedKey, old);
+        var sameFuture = old && ['tipo', 'descricao', 'valor_centavos', 'categoria_id', 'natureza', 'forma_pagamento', 'conta_origem_id', 'conta_destino_id', 'data_ocorrencia', 'competencia', 'data_vencimento', 'data_pagamento', 'compra_id', 'parcela_numero', 'parcelas_total', 'fatura_ref', 'status', 'cartao_final', 'id_parcelamento', 'importacao_hash', 'importacao_chave', 'criterio_mes', 'grupo_orcamento_importacao', 'credito_importado', 'valor_estimado', 'mes_fatura'].every(function (field) { return old[field] === future[field]; });
+        if (sameFuture) continue;
+        replaceTransaction(future, old); receipt.projetados++;
+      }
+    }
+    if (item.aprender) {
+      var learned = { estabelecimento: item.descricao_base, categoria_id: item.categoria_id, grupo_orcamento: item.grupo_orcamento };
+      var before = learning.get(learned.estabelecimento);
+      if (before && (before.categoria_id !== learned.categoria_id || before.grupo_orcamento !== learned.grupo_orcamento)) erro_('REGRA_CONFLITANTE', 'A mesma loja recebeu categorias ou grupos diferentes para aprender.');
+      learning.set(learned.estabelecimento, learned);
+    }
+  });
+  learning.forEach(function (rule) {
+    var found = rules.filter(function (r) { return impNormalizar_(r.estabelecimento) === rule.estabelecimento; });
+    if (found.length > 1) erro_('BANCO_INCONSISTENTE', 'Estabelecimento duplicado nas regras.');
+    var old = found[0];
+    var same = old && old.ativa === true && old.categoria_id === rule.categoria_id && old.grupo_orcamento === rule.grupo_orcamento;
+    if (!same) { stage('Regras_Categorizacao', metadata(Object.assign({ id: old ? old.id : env.uuid(), ativa: true }, rule), old)); receipt.regras_salvas++; }
+  });
+  return { entidade: 'Importacao', ids: receipt.ids.slice(), mudancas: changes, data: receipt };
+}
+
+
+export { normalizarEntidade_, criarLancamentos_, confirmarLancamento_, cancelarLancamento_, gerarRecorrencias_, calcularDashboard_, calcularProjecao_, listarFaturas_, categoriasPadrao_, configuracoesPadrao_, importarLote_ };

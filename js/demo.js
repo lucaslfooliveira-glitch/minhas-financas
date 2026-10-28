@@ -2,10 +2,11 @@
 import {
   normalizarEntidade_, criarLancamentos_, confirmarLancamento_, cancelarLancamento_,
   gerarRecorrencias_, calcularDashboard_, calcularProjecao_, listarFaturas_,
-  categoriasPadrao_, configuracoesPadrao_
+  categoriasPadrao_, configuracoesPadrao_, importarLote_
 } from './demo-engine.js';
+import { sha256Sync } from './sha256.js';
 
-const MUTATIONS = new Set(['entidade.salvar', 'lancamentos.criar', 'lancamentos.confirmar', 'lancamentos.cancelar', 'recorrencias.gerar', 'configuracoes.atualizar']);
+const MUTATIONS = new Set(['entidade.salvar', 'lancamentos.criar', 'lancamentos.confirmar', 'lancamentos.cancelar', 'recorrencias.gerar', 'configuracoes.atualizar', 'batchInsert']);
 const EDITABLE = new Set(['Contas', 'Categorias', 'Orcamentos', 'Recorrencias', 'Metas', 'SaldosPatrimoniais']);
 const clone = value => JSON.parse(JSON.stringify(value));
 function fail(code, message, details) { const error = new Error(message); error.code = code; if (details !== undefined) error.details = details; throw error; }
@@ -42,12 +43,12 @@ export class DemoApiClient {
   get connected() { return this.#connected; }
   async connect() { this.#connected = true; }
   disconnect() { this.#connected = false; }
-  #env(requestId = '') { return { today: this.#getToday(), now: new Date().toISOString(), uuid: createId, requestId }; }
+  #env(requestId = '') { return { today: this.#getToday(), now: new Date().toISOString(), uuid: createId, requestId, hash: sha256Sync }; }
 
   async call(request) {
     if (!this.#connected) fail('AUTH_REQUIRED', 'Entre novamente na demonstração.');
     object(request, 'Pedido');
-    if (JSON.stringify(request).length > 30000) fail('PEDIDO_GRANDE', 'O pedido excede o limite de tamanho.');
+    if (JSON.stringify(request).length > (request.acao === 'batchInsert' ? 250000 : 30000)) fail('PEDIDO_GRANDE', 'O pedido excede o limite de tamanho.');
     const isMutation = MUTATIONS.has(request.acao);
     if (!isMutation) return clone(this.#read(request));
     if (!/^[A-Za-z0-9_-]{8,100}$/.test(request.request_id || '')) fail('VALIDACAO', 'Informe um request_id válido para a operação.');
@@ -69,8 +70,9 @@ export class DemoApiClient {
   #read(request) {
     const env = this.#env();
     switch (request.acao) {
-      case 'sistema.info': return { versao: '1.0.0-demo', schema: '1', moeda: 'BRL', fuso: 'America/Sao_Paulo', hoje: env.today, planilha_url: '', demonstracao: true };
-      case 'dados.iniciais': return { configuracoes: this.#db.Configuracoes, contas: this.#db.Contas, categorias: this.#db.Categorias, recorrencias: this.#db.Recorrencias, metas: this.#db.Metas, orcamentos: this.#db.Orcamentos, hoje: env.today };
+      case 'sistema.info': return { versao: '1.2.0-demo', schema: '2', moeda: 'BRL', fuso: 'America/Sao_Paulo', hoje: env.today, planilha_url: '', demonstracao: true };
+      case 'dados.iniciais': return { configuracoes: this.#db.Configuracoes, contas: this.#db.Contas, categorias: this.#db.Categorias, recorrencias: this.#db.Recorrencias, metas: this.#db.Metas, orcamentos: this.#db.Orcamentos, hoje: env.today,
+        cartoes: this.#db.Cartoes, regras_categorizacao: this.#db.Regras_Categorizacao.map(r => ({...r, categoria_nome: this.#db.Categorias.find(c => c.id === r.categoria_id)?.nome || ''})), parcelamentos: this.#db.Parcelamentos, recursos: { batchInsert: true, schema: '2' } };
       case 'registros.listar': return this.#list(request);
       case 'dashboard.obter': return calcularDashboard_(this.#db, { mes: request.mes, data: request.data }, env);
       case 'projecao.obter': return calcularProjecao_(this.#db, { mes: request.mes, qtd_meses: request.qtd_meses }, env);
@@ -96,6 +98,14 @@ export class DemoApiClient {
   }
 
   #mutate(request, db, env) {
+    if (request.acao === 'batchInsert') {
+      const result = importarLote_(request.dados, db, env);
+      for (const {tabela, registro} of result.mudancas) {
+        const index = db[tabela].findIndex(row => row.id === registro.id);
+        if (index < 0) db[tabela].push(registro); else db[tabela][index] = registro;
+      }
+      return { table: result.entidade, ids: result.ids, data: result.data };
+    }
     let table = 'Lancamentos';
     let rows;
     switch (request.acao) {
@@ -167,7 +177,7 @@ export class DemoApiClient {
     const month = env.today.slice(0, 7);
     const firstMonth = addMonths(month, -5);
     const opening = lastDay(addMonths(firstMonth, -1));
-    const db = { Configuracoes: configuracoesPadrao_(), Contas: [], Categorias: categoriasPadrao_(env.now), Lancamentos: [], Orcamentos: [], Recorrencias: [], Metas: [], SaldosPatrimoniais: [], Auditoria: [] };
+    const db = { Configuracoes: configuracoesPadrao_(), Contas: [], Categorias: categoriasPadrao_(env.now), Lancamentos: [], Orcamentos: [], Recorrencias: [], Metas: [], SaldosPatrimoniais: [], Auditoria: [], Cartoes: [], Regras_Categorizacao: [], Parcelamentos: [] };
     const addEntity = (table, data, id) => { const row = normalizarEntidade_(table, data, db, env, null); if (id) row.id = id; db[table].push(row); return row; };
     addEntity('Contas', { nome: 'Conta do dia a dia', tipo: 'corrente', saldo_inicial_centavos: 100000, data_saldo_inicial: opening }, 'demo_conta');
     addEntity('Contas', { nome: 'Reserva de emergência', tipo: 'reserva', saldo_inicial_centavos: 400000, data_saldo_inicial: opening }, 'demo_reserva');

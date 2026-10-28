@@ -2,10 +2,10 @@
 const GOOGLE_SCRIPT = 'https://accounts.google.com/gsi/client';
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/userinfo.email'];
 const STORAGE_KEY = 'financas.connection.v1';
-const MUTATIONS = new Set(['entidade.salvar', 'lancamentos.criar', 'lancamentos.confirmar', 'lancamentos.cancelar', 'recorrencias.gerar', 'configuracoes.atualizar']);
+const MUTATIONS = new Set(['entidade.salvar', 'lancamentos.criar', 'lancamentos.confirmar', 'lancamentos.cancelar', 'recorrencias.gerar', 'configuracoes.atualizar', 'batchInsert']);
 const TOKEN_MARGIN_MS = 360000;
 // Estas rejeições são produzidas antes da gravação, após a verificação de replay.
-const DEFINITIVE_REJECTIONS = new Set(['VALIDACAO', 'CAMPO_INVALIDO', 'ACAO_INVALIDA', 'PEDIDO_GRANDE', 'VERSAO_CONFLITO', 'CONFLITO_VERSAO', 'NAO_ENCONTRADO', 'REFERENCIA_INVALIDA', 'CONTA_INCOMPATIVEL', 'CATEGORIA_INCOMPATIVEL', 'DATA_ANTERIOR_SALDO', 'DATA_FUTURA', 'DEPENDENCIA_FINANCEIRA', 'DUPLICADO', 'ESTORNO_EXCESSIVO', 'FATURA_OBRIGATORIA', 'HISTORICO_PROTEGIDO', 'LIMITE_LOTE', 'LIMITE_PROJECAO', 'PAGAMENTO_EXCESSIVO', 'ALOCACAO_EXCESSIVA', 'STATUS_INVALIDO', 'TABELA_INVALIDA', 'VENCIMENTO_FATURA_DIVERGENTE', 'RESPOSTA_GRANDE']);
+const DEFINITIVE_REJECTIONS = new Set(['VALIDACAO', 'CAMPO_INVALIDO', 'ACAO_INVALIDA', 'PEDIDO_GRANDE', 'VERSAO_CONFLITO', 'CONFLITO_VERSAO', 'NAO_ENCONTRADO', 'REFERENCIA_INVALIDA', 'CONTA_INCOMPATIVEL', 'CATEGORIA_INCOMPATIVEL', 'DATA_ANTERIOR_SALDO', 'DATA_FUTURA', 'DEPENDENCIA_FINANCEIRA', 'DUPLICADO', 'ESTORNO_EXCESSIVO', 'FATURA_OBRIGATORIA', 'HISTORICO_PROTEGIDO', 'IMPORTACAO_NAO_CONFIRMADA', 'IMPORTACAO_CONFLITO', 'REGRA_CONFLITANTE', 'LIMITE_LOTE', 'LIMITE_PROJECAO', 'PAGAMENTO_EXCESSIVO', 'ALOCACAO_EXCESSIVA', 'STATUS_INVALIDO', 'TABELA_INVALIDA', 'VENCIMENTO_FATURA_DIVERGENTE', 'RESPOSTA_GRANDE']);
 let googleLoading;
 
 export class ApiError extends Error {
@@ -253,6 +253,11 @@ export class GoogleApiClient {
       }
       if (!Object.prototype.hasOwnProperty.call(result, 'data')) throw new ApiError('RESPONSE_INVALID', 'A confirmação veio sem os dados esperados. Confira a mesma operação novamente.', { uncertain: mutation });
       if (mutation && result.request_id !== request.request_id) throw new ApiError('RESPONSE_MISMATCH', 'A confirmação recebida não corresponde ao envio. Confira a mesma operação novamente.', { uncertain: true });
+      if (request.acao === 'batchInsert') {
+        const receipt = result.data;
+        const counts = ['quantidade','inseridos','reconciliados','ignorados','projetados','regras_salvas','cartoes_salvos'];
+        if (!receipt || receipt.importacao_id !== request.request_id || counts.some(key => !Number.isSafeInteger(receipt[key]) || receipt[key] < 0)) throw new ApiError('RESPONSE_INVALID', 'O recibo da importação não foi confirmado. Confira o mesmo envio antes de iniciar outro lote.', { uncertain: true });
+      }
       if (generation !== this._generation) throw new ApiError('AUTH_CANCELLED', 'A conexão foi encerrada durante a solicitação.', { uncertain: mutation });
       return result.data;
     } catch (error) {

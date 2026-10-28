@@ -1,16 +1,25 @@
 import { GoogleApiClient, loadConnectionConfig, saveConnectionConfig, clearConnectionConfig } from './api.js';
 import { DemoApiClient } from './demo.js';
 import { setupPwa } from './pwa.js';
+import { createImportReview } from './import-review.js';
 import { money, percent, today, monthNow, shiftMonth, dateLabel, monthLabel, parseMoney, escapeHtml as esc, uuid, buildTransaction, buildSnapshotRequest } from './utils.js';
 
 const $ = selector => document.querySelector(selector);
-const state = { view: 'dashboard', mode: 'disconnected', month: monthNow(), initials: null, dashboard: null, transactions: [], invoices: null, projection: null, private: false, busy: false, pending: null, offset: 0, nextOffset: null, updated: null, error: '', filter: '' };
+const state = { view: 'dashboard', mode: 'disconnected', month: monthNow(), initials: null, dashboard: null, transactions: [], invoices: null, projection: null, private: false, busy: false, pending: null, offset: 0, nextOffset: null, updated: null, error: '', filter: '', cardFilter: '' };
 let client = null, googleClient = null, charts = [], modalHandler = null, modalDirty = false, modalBusy = false, pwa;
 let authConnecting = false, authGeneration = 0;
 const types = { receita: 'Entrada', despesa: 'Saída', aporte: 'Investimento', resgate: 'Resgate', transferencia: 'Transferência', ajuste: 'Ajuste', estorno: 'Estorno' };
 const accountTypes = { corrente: 'Conta corrente', carteira: 'Dinheiro', reserva: 'Reserva', investimento: 'Investimento', cartao: 'Cartão de crédito', divida: 'Dívida' };
 const groups = { necessidades: 'Necessidades', desejos: 'Desejos', metas: 'Investimentos e metas' };
-const labels = { dashboard: ['Visão geral', 'Seu dinheiro, com clareza.'], transactions: ['Lançamentos', 'O que entrou, saiu e ficou para depois.'], planning: ['Planejamento', 'Dê um destino ao seu dinheiro.'], accounts: ['Contas e patrimônio', 'Seu saldo disponível e o que você está construindo.'], settings: ['Conexão e preferências', 'Seu aplicativo conectado à sua conta Google.'] };
+const labels = { dashboard: ['Visão geral', 'Seu dinheiro, com clareza.'], transactions: ['Lançamentos', 'O que entrou, saiu e ficou para depois.'], planning: ['Planejamento', 'Dê um destino ao seu dinheiro.'], accounts: ['Contas e patrimônio', 'Seu saldo disponível e o que você está construindo.'], settings: ['Conexão e preferências', 'Seu aplicativo conectado à sua conta Google.'], import: ['Importar fatura', 'Leia, confira e organize seus gastos no cartão Itaú.'] };
+const importUI = createImportReview({
+  isActive: () => state.view === 'import', notify: toast,
+  getContext: () => ({ categorias: state.initials?.categorias || [], contas: state.initials?.contas || [],
+    cartoes: state.initials?.cartoes || [], regras: state.initials?.regras_categorizacao || [], parcelamentos: state.initials?.parcelamentos || [],
+    recursos: state.initials?.recursos || {}, private: state.private, mode: state.mode, locked: state.busy || authConnecting, pending: !!state.pending,
+    read: client ? request => client.call(request) : null,
+    save: client ? request => runMutation(request, state.mode === 'demo' ? 'Importação simulada nesta sessão.' : 'Importação confirmada no Google Drive.') : null }),
+});
 const icon = name => ({ plus: '+', up: '↗', down: '↙', arrow: '→', save: '✓', empty: '◇', bank: '▤', lock: '◈' }[name] || '◇');
 const M = value => state.private ? '••••' : money(value);
 const P = value => state.private ? '••' : percent(value);
@@ -36,8 +45,14 @@ function updateShell() {
   $('#connection-button').disabled = authConnecting;
   $('#connection-status').textContent = state.mode === 'real' ? 'Google Drive conectado' : state.mode === 'demo' ? 'Demonstração' : 'Aguardando conexão';
   $('#month-select').value = state.month;
-  $('#month-select').hidden = state.view === 'settings';
-  $('#month-select').closest('.month-control').hidden = state.view === 'settings';
+  $('#month-select').hidden = ['settings', 'import'].includes(state.view);
+  $('#month-select').closest('.month-control').hidden = ['settings', 'import'].includes(state.view);
+  $('#new-button').hidden = state.view === 'import';
+  $('#mobile-new-button').hidden = state.view === 'import';
+  $('#refresh-button').hidden = state.view === 'import';
+  document.body.classList.toggle('import-view', state.view === 'import');
+  document.querySelector('.mobile-nav [data-view="transactions"]')?.classList.toggle('active', ['transactions', 'import'].includes(state.view));
+  if (state.view === 'import') document.querySelector('.mobile-nav [data-view="transactions"]')?.setAttribute('aria-current', 'page');
   $('#mode-banner').hidden = state.mode !== 'demo';
   $('#mode-banner').textContent = 'Demonstração com dados fictícios. Alterações ficam somente nesta sessão e desaparecem ao recarregar.';
   $('#offline-banner').hidden = navigator.onLine;
@@ -56,6 +71,7 @@ function notice(message, kind = 'warning') { return `<div class="notice ${kind}"
 function render() {
   destroyCharts(); updateShell();
   const main = $('#main-content');
+  if (state.view === 'import') { importUI.mount(main); return; }
   if (state.view === 'settings') { main.innerHTML = renderSettings(); return; }
   if (!client) { main.innerHTML = renderWelcome(); return; }
   if (!state.initials || !state.dashboard) { main.innerHTML = state.error ? notice(state.error, 'danger') + empty('Vamos tentar novamente', 'Confira sua conexão e atualize os dados.', '<button class="button primary" data-action="refresh">Atualizar</button>') : `<div class="loading-state" role="status"><span class="spinner"></span><p>Buscando seus dados…</p></div>`; return; }
@@ -66,7 +82,7 @@ function render() {
   if (state.view === 'planning' && state.projection) drawProjection();
 }
 function renderWelcome() {
-  return `<div class="welcome panel"><div class="welcome-art" aria-hidden="true"><div class="welcome-orbit"><span>R$</span></div><i></i><i></i><i></i></div><div class="welcome-copy"><span class="eyebrow">SEU DINHEIRO. NO SEU DRIVE.</span><h2>Mais clareza para<br>os seus próximos passos.</h2><p>Organize o presente, acompanhe suas metas e saiba quanto da sua renda já está comprometido.</p><div class="inline-actions"><button class="button primary" data-action="setup">Conectar minha conta <span aria-hidden="true">→</span></button><button class="button secondary" data-action="demo">Conhecer a demonstração</button></div><p class="field-note">Seus registros ficam na sua planilha privada. A demonstração usa dados fictícios e é reiniciada ao recarregar.</p></div></div><div class="feature-grid"><article class="panel"><span class="eyebrow">01 / PRESENTE</span><h3>Lance em poucos toques</h3><p class="muted">Entradas, saídas e investimentos em um formulário pensado para o celular.</p></article><article class="panel"><span class="eyebrow">02 / EQUILÍBRIO</span><h3>Um plano para cada mês</h3><p class="muted">Comece com 50–30–20 e ajuste seus limites por categoria.</p></article><article class="panel"><span class="eyebrow">03 / FUTURO</span><h3>Veja o que vem pela frente</h3><p class="muted">Parcelas, recorrências e metas para planejar com antecedência.</p></article></div>`;
+  return `<div class="welcome panel"><div class="welcome-art" aria-hidden="true"><div class="welcome-orbit"><span>R$</span></div><i></i><i></i><i></i></div><div class="welcome-copy"><span class="eyebrow">SEU DINHEIRO. NO SEU DRIVE.</span><h2>Mais clareza para<br>os seus próximos passos.</h2><p>Organize o presente, acompanhe suas metas e saiba quanto da sua renda já está comprometido.</p><div class="inline-actions"><button class="button primary" data-action="setup">Conectar minha conta <span aria-hidden="true">→</span></button><button class="button secondary" data-action="demo">Conhecer a demonstração</button><button class="button ghost" data-view="import">Revisar uma fatura Itaú</button></div><p class="field-note">Seus registros ficam na sua planilha privada. A demonstração usa dados fictícios e é reiniciada ao recarregar.</p></div></div><div class="feature-grid"><article class="panel"><span class="eyebrow">01 / PRESENTE</span><h3>Lance em poucos toques</h3><p class="muted">Entradas, saídas e investimentos em um formulário pensado para o celular.</p></article><article class="panel"><span class="eyebrow">02 / EQUILÍBRIO</span><h3>Um plano para cada mês</h3><p class="muted">Comece com 50–30–20 e ajuste seus limites por categoria.</p></article><article class="panel"><span class="eyebrow">03 / FUTURO</span><h3>Veja o que vem pela frente</h3><p class="muted">Parcelas, recorrências e metas para planejar com antecedência.</p></article></div>`;
 }
 function kpi(label, value, foot, extra = '') { return `<article class="kpi-card ${extra}"><span class="kpi-label">${label}</span><strong class="kpi-value">${value}</strong><span class="kpi-foot">${foot}</span></article>`; }
 function renderDashboard() {
@@ -80,10 +96,18 @@ function renderDashboard() {
     ${alerts.length ? notice(`${alerts.length} categoria(s) com limite ultrapassado ou em risco. Consulte os limites em Planejamento.`) : ''}
     <div class="dashboard-grid"><section class="panel"><div class="panel-heading"><div><span class="eyebrow">DISTRIBUIÇÃO</span><h3>Para onde foi o dinheiro</h3></div><span class="badge neutral">${M(i.despesas_orcamentarias_centavos)}</span></div>${spent.length ? '<div class="chart-box"><canvas id="spending-chart" role="img" aria-label="Distribuição das despesas por categoria"></canvas></div>' : empty('Seu mapa de gastos começa aqui', 'As despesas confirmadas aparecem por categoria.')}<div class="legend-list">${spent.map((c, n) => `<button class="legend-row" data-action="category-filter" data-id="${esc(c.categoria_id)}"><span><i class="legend-dot tone-${n % 6}"></i>${esc(c.nome)}</span><strong>${M(c.realizado_centavos)}</strong></button>`).join('')}</div></section>
     <section class="panel"><div class="panel-heading"><div><span class="eyebrow">SEU ORÇAMENTO</span><h3>Equilíbrio do mês</h3></div>${actionButton('Ajustar →', 'budget')}</div><p class="muted">Renda planejada: <strong>${M(d.orcamento.renda_planejada_centavos)}</strong></p><div class="stack">${d.grupos.map(g => { const ratio = g.limite_centavos > 0 ? Math.min(100, Math.max(0, g.realizado_centavos / g.limite_centavos * 100)) : 0; return `<div><div class="legend-row"><span>${groups[g.grupo]}</span><span>${g.percentual === null ? 'Valor fixo' : P(g.percentual)}</span></div><div class="progress-track"><span class="progress-fill ${g.alerta === 'ultrapassado' ? 'over' : ''}" style="width:${ratio}%"></span></div><div class="legend-row muted"><span>${M(g.realizado_centavos)} realizados</span><span>de ${M(g.limite_centavos)}</span></div></div>`; }).join('')}</div><p class="field-note">Necessidades e desejos são limites de consumo. Metas representam o dinheiro destinado a guardar, descontados os resgates.</p></section></div>
-    <div class="dashboard-grid"><section class="panel"><div class="panel-heading"><div><span class="eyebrow">CONSTRUÇÃO</span><h3>Evolução do patrimônio</h3></div></div>${d.evolucao_patrimonial.some(e => e.historico_disponivel) ? '<div class="chart-box short"><canvas id="wealth-chart" role="img" aria-label="Patrimônio líquido nos últimos doze meses"></canvas></div>' : empty('Histórico em formação', 'Cadastre suas contas para iniciar o acompanhamento.')}${wealthHistory(d)}<p class="field-note">Ativos menos dívidas, incluindo parcelas futuras de compras já realizadas. Valores dependem das avaliações cadastradas.</p></section><section class="panel"><div class="panel-heading"><div><span class="eyebrow">MOVIMENTAÇÕES</span><h3>Últimos lançamentos</h3></div><button class="button ghost small" data-view="transactions">Ver todos →</button></div>${recent.length ? transactionRows(recent, false) : empty('Nenhum lançamento neste mês', 'Adicione sua primeira entrada ou saída.', '<button class="button primary" data-action="transaction">Novo lançamento</button>')}</section></div>
-    <div class="summary-strip"><span>Despesas fixas <strong>${M(i.despesas_fixas_orcamentarias_centavos)}</strong></span><span>Despesas variáveis <strong>${M(i.despesas_variaveis_orcamentarias_centavos)}</strong></span><span>Aportes líquidos <strong>${M(i.poupanca_liquida_centavos)}</strong></span></div><p class="field-note">Poupança direcionada = (aportes − resgates) ÷ receita recebida. Aportes não são consumo; pagamentos de fatura não somam outra despesa.</p></div>`;
+    <div class="dashboard-grid"><section class="panel"><div class="panel-heading"><div><span class="eyebrow">CONSTRUÇÃO</span><h3>Evolução do patrimônio</h3></div></div>${d.evolucao_patrimonial.some(e => e.historico_disponivel) ? '<div class="chart-box short"><canvas id="wealth-chart" role="img" aria-label="Patrimônio líquido nos últimos doze meses"></canvas></div>' : empty('Histórico em formação', 'Cadastre suas contas para iniciar o acompanhamento.')}${wealthHistory(d)}<p class="field-note">Ativos menos dívidas registradas. Parcelas estimadas da importação ficam fora deste saldo. Confira as avaliações e o total contratado no cartão.</p></section><section class="panel"><div class="panel-heading"><div><span class="eyebrow">MOVIMENTAÇÕES</span><h3>Últimos lançamentos</h3></div><button class="button ghost small" data-view="transactions">Ver todos →</button></div>${recent.length ? transactionRows(recent, false) : empty('Nenhum lançamento neste mês', 'Adicione sua primeira entrada ou saída.', '<button class="button primary" data-action="transaction">Novo lançamento</button>')}</section></div>
+    ${renderCardSpending()}${d.importacao_aviso ? notice(d.importacao_aviso.mensagem) : ''}<div class="summary-strip"><span>Despesas fixas <strong>${M(i.despesas_fixas_orcamentarias_centavos)}</strong></span><span>Despesas variáveis <strong>${M(i.despesas_variaveis_orcamentarias_centavos)}</strong></span><span>Aportes líquidos <strong>${M(i.poupanca_liquida_centavos)}</strong></span></div><p class="field-note">Poupança direcionada = (aportes − resgates) ÷ receita recebida. Aportes não são consumo; pagamentos de fatura não somam outra despesa.</p></div>`;
 }
 
+function renderCardSpending() {
+  const all = state.dashboard.gastos_cartoes || [];
+  if (!all.length) return '';
+  const key = c => c.conta_id + ':' + c.final;
+  if (state.cardFilter && !all.some(c => key(c) === state.cardFilter)) state.cardFilter = '';
+  const rows = state.cardFilter ? all.filter(c => key(c) === state.cardFilter) : all;
+  return `<section class="panel"><div class="panel-heading"><div><span class="eyebrow">FÍSICO, VIRTUAL E ADICIONAL</span><h2>Gastos por cartão</h2><p>Despesas e créditos líquidos no mês do orçamento. Pagamentos de fatura ficam fora deste total.</p></div><label class="field">Cartão<select id="dashboard-card-filter" aria-label="Filtrar gastos por cartão"><option value="">Todos os cartões</option>${all.map(c=>`<option value="${esc(key(c))}" ${state.cardFilter === key(c) ? 'selected' : ''}>${esc(c.apelido)}${c.final ? ' · ' + esc(c.final) : ''}${c.responsavel ? ' · ' + esc(c.responsavel) : ''}</option>`).join('')}</select></label></div><div class="table-wrap"><table class="data-table"><caption class="sr-only">Gastos líquidos por final do cartão</caption><thead><tr><th scope="col">Cartão / responsável</th><th scope="col">Realizado</th><th scope="col">Previsto</th></tr></thead><tbody>${rows.map(c=>`<tr><th scope="row">${esc(c.apelido)} ${c.final ? '•••• ' + esc(c.final) : ''}<small class="import-mini-label">${esc(({fisico:'Físico',virtual:'Virtual',adicional:'Adicional'})[c.modalidade] || 'Final não identificado')}${c.responsavel ? ' · ' + esc(c.responsavel) : ''}</small></th><td>${M(c.realizado_centavos)}</td><td>${M(c.previsto_centavos)}</td></tr>`).join('')}</tbody></table></div></section>`;
+}
 function wealthHistory(dashboard) {
   return '<details class="history-details"><summary>Ver valores do histórico</summary><div class="table-wrap"><table class="data-table"><caption class="sr-only">Patrimônio líquido nos últimos doze meses</caption><thead><tr><th scope="col">Mês</th><th scope="col">Patrimônio líquido</th></tr></thead><tbody>' + dashboard.evolucao_patrimonial.map(point => '<tr><th scope="row">' + esc(monthLabel(point.mes)) + '</th><td>' + (point.historico_disponivel ? M(point.patrimonio_liquido_centavos) : 'Sem histórico') + '</td></tr>').join('') + '</tbody></table></div></details>';
 }
@@ -98,15 +122,15 @@ function transactionRows(rows, actions = true) {
 }
 function renderTransactions() {
   const filtered = state.transactions.filter(l => (!state.filter || l.categoria_id === state.filter));
-  return `<div class="page-stack"><div class="section-heading"><div><span class="eyebrow">HISTÓRICO DO MÊS</span><h2>Um lançamento de cada vez</h2></div><button class="button primary" data-action="transaction">+ Novo lançamento</button></div><div class="panel"><div class="filter-bar"><label class="field">Categoria<select id="transaction-filter"><option value="">Todas as categorias</option>${options(state.initials.categorias, state.filter)}</select></label><p class="field-note">Competência: ${esc(monthLabel(state.month))}. Compras no cartão aparecem por parcela.</p></div>${filtered.length ? transactionRows(filtered) : empty('Sem lançamentos para este filtro', 'Escolha outra categoria ou registre uma movimentação.')}${state.nextOffset !== null ? '<button class="button secondary" data-action="more-transactions">Carregar mais</button>' : ''}</div></div>`;
+  return `<div class="page-stack"><div class="section-heading"><div><span class="eyebrow">HISTÓRICO DO MÊS</span><h2>Um lançamento de cada vez</h2></div><div class="inline-actions"><button class="button secondary" data-view="import">Importar fatura Itaú</button><button class="button primary" data-action="transaction">+ Novo lançamento</button></div></div><div class="panel"><div class="filter-bar"><label class="field">Categoria<select id="transaction-filter"><option value="">Todas as categorias</option>${options(state.initials.categorias, state.filter)}</select></label><p class="field-note">Competência: ${esc(monthLabel(state.month))}. Compras no cartão aparecem por parcela.</p></div>${filtered.length ? transactionRows(filtered) : empty('Sem lançamentos para este filtro', 'Escolha outra categoria ou registre uma movimentação.')}${state.nextOffset !== null ? '<button class="button secondary" data-action="more-transactions">Carregar mais</button>' : ''}</div></div>`;
 }
 function renderPlanning() {
   const d = state.dashboard;
   const invoices = state.invoices?.faturas.filter(f => f.restante_centavos > 0 || f.previsto_credito_centavos > 0).slice(0, 8) || [];
-  return `<div class="page-stack"><div class="section-heading"><div><span class="eyebrow">PRÓXIMOS PASSOS</span><h2>Planeje com espaço para viver</h2></div><button class="button primary" data-action="budget">Definir orçamento</button></div>
+  return `<div class="page-stack">${(state.invoices?.conciliacao_necessaria || []).map(c=>notice(c.mensagem)).join('')}<div class="section-heading"><div><span class="eyebrow">PRÓXIMOS PASSOS</span><h2>Planeje com espaço para viver</h2></div><button class="button primary" data-action="budget">Definir orçamento</button></div>
     <section class="panel"><div class="panel-heading"><h3>Gasto e limite por categoria</h3><button class="button secondary small" data-action="category">+ Categoria</button></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Categoria</th><th>Realizado</th><th>Previsto</th><th>Limite</th><th>Situação</th><th><span class="sr-only">Ação</span></th></tr></thead><tbody>${d.categorias.map(c => `<tr><td>${esc(c.nome)}</td><td>${M(c.realizado_centavos)}</td><td>${M(c.previsto_centavos)}</td><td>${M(c.limite_centavos)}</td><td><span class="badge ${c.alerta === 'ultrapassado' ? 'negative' : c.alerta === 'risco' ? 'warning' : 'neutral'}">${({ dentro: 'Dentro do plano', risco: 'Em risco', ultrapassado: 'Ultrapassado', sem_orcamento: 'Sem limite' })[c.alerta]}</span></td><td>${actionButton('Definir limite', 'category-budget', c.categoria_id)}</td></tr>`).join('')}</tbody></table></div></section>
     <section class="panel"><div class="panel-heading"><div><span class="eyebrow">COMPROMETIMENTO FUTURO</span><h3>O que vem pela frente</h3></div><span class="badge neutral">Próximos 6 meses</span></div>${state.projection ? '<div class="chart-box short"><canvas id="projection-chart" role="img" aria-label="Entradas e saídas previstas dos próximos seis meses"></canvas></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Mês</th><th>Entradas estimadas</th><th>Saídas previstas</th><th>Saldo projetado</th></tr></thead><tbody>' + state.projection.meses.map(m => `<tr><td>${esc(monthLabel(m.mes))}</td><td>${M(m.entradas_previstas_centavos)}</td><td>${M(m.saidas_previstas_centavos)}</td><td class="${m.saldo_negativo ? 'negative' : ''}">${M(m.saldo_final_centavos)}</td></tr>`).join('') + '</tbody></table></div>' : '<p class="muted">A projeção será carregada junto com o planejamento.</p>'}<p class="field-note">Inclui apenas compromissos cadastrados, com quitação integral das faturas. Receitas previstas são estimativas. Dívidas iniciais sem vencimento e créditos de cartão precisam de conferência.</p>${state.projection?.avisos?.includes('RECORRENCIAS_ANTIGAS_NAO_PROJETADAS') ? notice('Há ocorrências antigas de recorrências ainda não geradas. Gere o período anterior para conferir o que foi pago ou cancelar o que não se aplica.') : ''}</section>
-    <section class="panel"><div class="panel-heading"><h3>Faturas em aberto</h3></div>${invoices.length ? `<div class="account-grid">${invoices.map(f => `<article class="account-card"><div class="legend-row"><strong>${esc(f.nome_cartao)}</strong><span class="badge ${f.atrasada ? 'negative' : 'neutral'}">${f.atrasada ? 'Vencida' : 'Em aberto'}</span></div><p>Vence em ${dateLabel(f.data_vencimento)}</p><strong class="kpi-value">${M(f.restante_centavos)}</strong><p class="field-note">${M(f.pago_centavos)} pagos · ${M(f.previsto_credito_centavos)} em previsões</p>${f.restante_centavos > 0 ? `<button class="button secondary small" data-action="pay-invoice" data-id="${esc(f.fatura_ref)}">Registrar pagamento</button>` : ''}</article>`).join('')}</div>` : empty('Sem faturas pendentes', 'Compras com cartão e parcelas aparecerão aqui.')}${state.invoices?.dividas_iniciais_sem_vencimento?.length ? notice('Existe dívida inicial sem vencimento definido. Ela compõe o patrimônio, mas fica fora das saídas datadas da projeção. Registre a amortização em um lançamento de transferência.') : ''}</section>
+    <section class="panel"><div class="panel-heading"><h3>Faturas em aberto</h3></div>${invoices.length ? `<div class="account-grid">${invoices.map(f => `<article class="account-card"><div class="legend-row"><strong>${esc(f.nome_cartao)}</strong><span class="badge ${f.atrasada ? 'negative' : 'neutral'}">${f.exige_conciliacao ? 'Conferir conciliação' : f.atrasada ? 'Vencida' : 'Em aberto'}</span></div><p>Vence em ${dateLabel(f.data_vencimento)}</p><strong class="kpi-value">${M(f.restante_centavos)}</strong><p class="field-note">${M(f.pago_centavos)} pagos · ${M(f.previsto_credito_centavos)} em previsões</p>${f.restante_centavos > 0 ? `<button class="button secondary small" data-action="pay-invoice" data-id="${esc(f.fatura_ref)}">Registrar pagamento</button>` : ''}</article>`).join('')}</div>` : empty('Sem faturas pendentes', 'Compras com cartão e parcelas aparecerão aqui.')}${state.invoices?.dividas_iniciais_sem_vencimento?.length ? notice('Existe dívida inicial sem vencimento definido. Ela compõe o patrimônio, mas fica fora das saídas datadas da projeção. Registre a amortização em um lançamento de transferência.') : ''}</section>
     <div class="dashboard-grid"><section class="panel"><div class="panel-heading"><h3>Recorrências mensais</h3><button class="button secondary small" data-action="recurrence">+ Recorrência</button></div>${state.initials.recorrencias.length ? state.initials.recorrencias.map(r => `<div class="legend-row"><div><strong>${esc(r.descricao)}</strong><p class="field-note">Dia ${r.dia_vencimento} · ${M(r.valor_previsto_centavos)} · ${r.ativa ? 'Ativa' : 'Pausada'}</p></div>${actionButton(r.ativa ? 'Pausar' : 'Ativar', 'toggle-recurrence', r.id)}</div>`).join('') + '<button class="button secondary" data-action="generate">Gerar previsões</button>' : empty('Menos tarefas repetidas', 'Cadastre aluguel, salário ou assinaturas e confirme os valores quando acontecerem.')}</section><section class="panel"><div class="panel-heading"><h3>Suas metas</h3><button class="button secondary small" data-action="goal">+ Meta</button></div>${d.metas.length ? d.metas.map(m => `<article class="goal-item"><div class="legend-row"><strong>${esc(m.nome)}</strong><span>${P(m.progresso_percentual)}</span></div><div class="progress-track"><span class="progress-fill" style="width:${Math.min(100, Math.max(0, m.progresso_percentual || 0))}%"></span></div><p class="field-note">${M(m.valor_alocado_centavos)} de ${M(m.valor_alvo_centavos)}${m.data_alvo ? ' · até ' + dateLabel(m.data_alvo) : ''}</p>${actionButton('Ajustar reserva da meta', 'goal', m.meta_id)}${m.alocacao_conta_excedida ? notice('As metas desta conta superam o saldo atual.') : ''}</article>`).join('') : empty('Comece pelo que importa', 'Uma reserva de emergência ou um objetivo com valor e prazo.')}</section></div></div>`;
 }
 function renderAccounts() {
@@ -147,33 +171,37 @@ async function setView(view) {
   $('#main-content').focus({ preventScroll: true });
   window.scrollTo({ top: 0, behavior: 'instant' });
 }
-function resetData() { state.initials = null; state.dashboard = null; state.transactions = []; state.invoices = null; state.projection = null; state.error = ''; state.filter = ''; }
+function resetData({ preserveImport = false } = {}) { if (!preserveImport) importUI.reset(); state.initials = null; state.dashboard = null; state.transactions = []; state.invoices = null; state.projection = null; state.error = ''; state.filter = ''; }
 function pendingGuard() { if (state.pending) { toast('Confira o envio pendente antes de trocar a conexão ou iniciar outra operação.', true); return true; } return false; }
 async function enterDemo() {
   if (pendingGuard() || state.busy || authConnecting) return;
-  if (state.mode === 'real' && !confirm('Abrir a demonstração e encerrar a visualização da sua conta neste navegador?')) return;
+  if ((state.mode === 'real' || importUI.hasDraft()) && !confirm('Abrir a demonstração e descartar a revisão de fatura desta sessão? A visualização da conta atual será encerrada.')) return;
   googleClient?.disconnect(); client = new DemoApiClient(); state.mode = 'demo'; state.month = monthNow(); state.view = 'dashboard'; resetData(); render(); await loadData(); window.scrollTo({ top: 0, behavior: 'instant' });
 }
 function connectGoogle() {
   if (state.busy || modalBusy || authConnecting) return;
   if (!connectionConfig.clientId || !connectionConfig.deploymentId) { setView('settings'); toast('Preencha e salve os dois identificadores para conectar.'); return; }
+  const preserveImport = state.mode === 'real' && (importUI.hasDraft() || state.pending?.request.acao === 'batchInsert');
+  if (!preserveImport && !importUI.confirmDiscard('Conectar a conta Google descartará a revisão de fatura atual após o login. Continuar?')) return;
   try {
     if (!googleClient) googleClient = new GoogleApiClient(connectionConfig);
     const generation = ++authGeneration;
-    authConnecting = true; updateShell();
+    authConnecting = true; render();
     const connection = googleClient.connect();
     // A abertura da janela ocorre no mesmo gesto do clique, antes deste then.
     connection.then(async () => {
       if (generation !== authGeneration) return;
-      authConnecting = false; client = googleClient; state.mode = 'real'; resetData(); render();
+      authConnecting = false; client = googleClient; state.mode = 'real'; resetData({ preserveImport }); render();
       await loadData(); if (!state.error) toast('Conta Google conectada.');
-    }).catch(error => { if (generation !== authGeneration) return; authConnecting = false; updateShell(); toast(error.message, true); });
-  } catch (error) { authConnecting = false; updateShell(); toast(error.message, true); }
+    }).catch(error => { if (generation !== authGeneration) return; authConnecting = false; render(); toast(error.message, true); });
+  } catch (error) { authConnecting = false; render(); toast(error.message, true); }
 }
 function disconnect() {
   if (pendingGuard() || state.busy) return;
   if ($('#modal').open && !closeModal()) return;
+  if (!importUI.confirmDiscard('Desconectar descarta o arquivo e a revisão de fatura desta sessão. Continuar?')) return false;
   authGeneration++; authConnecting = false; client?.disconnect(); googleClient?.disconnect(); client = null; state.mode = 'disconnected'; resetData(); render();
+  return true;
 }
 
 function field(name, label, type = 'text', value = '', extra = '') { return `<label class="field">${label}<input name="${name}" type="${type}" value="${esc(value)}" ${extra}></label>`; }
@@ -208,15 +236,19 @@ async function runMutation(request, label = 'Registro salvo') {
   if (!state.pending) state.pending = { request: JSON.parse(JSON.stringify({ ...request, request_id: request.request_id || uuid() })), label, uncertain: false };
   state.busy = true; modalBusy = true; updateShell(); $('#modal-submit').disabled = true; $('#modal-close').disabled = true; $('#modal-cancel').disabled = true;
   let succeeded = false;
+  const sentRequest = state.pending.request;
+  const importRequest = sentRequest.acao === 'batchInsert';
   try {
-    await client.call(state.pending.request);
+    const result = await client.call(state.pending.request);
     const message = state.pending.label; state.pending = null; succeeded = true; modalBusy = false;
     if ($('#modal').open) closeModal(true);
+    if (importRequest) { state.month = sentRequest.dados.criterio_mes === 'vencimento' ? sentRequest.dados.vencimento.slice(0, 7) : sentRequest.dados.lancamentos.at(-1).data_compra.slice(0, 7); importUI.receiveSaved(result); }
     toast(message);
   } catch (error) {
     if (!error.definitive && (error.uncertain || state.pending.uncertain)) state.pending.uncertain = true;
     else state.pending = null;
     const message = error.message || 'Não foi possível salvar.';
+    if (importRequest) importUI.receiveSaveError(error, { uncertain: !!state.pending });
     showFormError(error);
     toast(message, true);
   } finally {
@@ -296,6 +328,7 @@ function openInvoice(ref) {
 function openTxAction(kind, id) {
   const l = state.transactions.find(l => l.id === id);
   if (!l) return;
+  if (kind === 'confirm-tx' && l.importacao_id && l.valor_estimado) { void setView('import'); toast('Importe a fatura correspondente para confirmar esta parcela e preservar seu vínculo.'); return; }
   if (kind === 'confirm-tx') showModal('Confirmar movimentação', `<p>${esc(l.descricao || types[l.tipo])}</p>${field('valor', 'Valor real em reais', 'text', amountInput(l.valor_centavos), 'required inputmode="decimal" data-autofocus')}${field('data', l.forma_pagamento === 'credito' ? 'Data real da compra' : 'Data real da movimentação', 'date', today(), `required max="${today()}"`)}`, v => ({ acao: 'lancamentos.confirmar', dados: { id: l.id, versao: l.versao, valor_centavos: parseMoney(v.valor), data_ocorrencia: v.data, ...(l.forma_pagamento === 'credito' ? {} : { data_pagamento: v.data }) } }), 'Confirmar');
   if (kind === 'refund') showModal('Registrar estorno', `<p>${esc(l.descricao || category(l.categoria_id)?.nome || 'Despesa')} · ${M(l.valor_centavos)}</p>${field('valor', 'Valor devolvido em reais', 'text', '', 'required inputmode="decimal" data-autofocus')}${field('data', 'Data da devolução', 'date', today(), `required max="${today()}"`)}<p class="field-note">O estorno retorna à conta original e reduz a categoria da despesa. Para compra parcelada, este registro refere-se somente à parcela selecionada.</p>`, v => ({ acao: 'lancamentos.criar', dados: { tipo: 'estorno', estorno_de_id: id, descricao: `Estorno de ${l.descricao || 'despesa'}`.slice(0, 500), valor_centavos: parseMoney(v.valor), data_ocorrencia: v.data } }), 'Registrar estorno');
   if (kind === 'cancel-tx') showModal('Anular lançamento', `<p>${esc(l.descricao || types[l.tipo])} · ${M(l.valor_centavos)}</p>${notice('Use para corrigir um registro incorreto. A anulação recalcula os saldos e preserva a linha no histórico. Para um reembolso real, registre um estorno.')}${l.parcelas_total > 1 ? '<label class="checkbox-row"><input type="checkbox" name="compra_inteira">Anular todas as parcelas desta compra</label>' : ''}`, v => ({ acao: 'lancamentos.cancelar', dados: { id: id, versao: l.versao, compra_inteira: v.compra_inteira === 'on' } }), 'Anular lançamento');
@@ -328,7 +361,7 @@ async function handleAction(action, id) {
   if (action === 'clear-config') {
     if (pendingGuard() || state.busy || authConnecting) return;
     if (!confirm('Remover os identificadores salvos neste navegador? Seus registros no Google Drive continuam disponíveis.')) return;
-    disconnect(); clearConnectionConfig(); connectionConfig = { clientId: '', deploymentId: '' }; googleClient = null; render(); return;
+    if (disconnect() === false) return; clearConnectionConfig(); connectionConfig = { clientId: '', deploymentId: '' }; googleClient = null; render(); return;
   }
   if (!client || !state.initials) { toast('Conecte sua conta ou abra a demonstração primeiro.'); return; }
   if (action === 'retry') { if (state.pending) return runMutation(state.pending.request); return; }
@@ -372,6 +405,7 @@ $('#privacy-button').addEventListener('click', () => { state.private = !state.pr
 $('#install-button').addEventListener('click', () => void pwa.install());
 $('#month-select').addEventListener('change', () => { if (state.busy) { $('#month-select').value = state.month; return; } const value = $('#month-select').value; if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(value)) return; state.month = value; state.dashboard = null; state.transactions = []; state.invoices = null; state.projection = null; render(); void loadData(); });
 document.addEventListener('change', event => {
+  if (event.target.id === 'dashboard-card-filter') { state.cardFilter = event.target.value; render(); }
   if (event.target.id === 'transaction-filter') { state.filter = event.target.value; render(); }
   if (!event.target.closest('#modal-form')) return;
   const kind = $('#modal-form').dataset.kind;
@@ -405,8 +439,10 @@ document.addEventListener('submit', async event => {
     event.preventDefault(); if (pendingGuard() || state.busy || authConnecting) return;
     const submit = event.target.querySelector('[type="submit"]'); submit.disabled = true;
     try {
+      if (!importUI.confirmDiscard('Salvar a conexão descarta a revisão de fatura atual. Continuar?')) return;
       const cfg = saveConnectionConfig(Object.fromEntries(new FormData(event.target)));
-      disconnect(); connectionConfig = { clientId: cfg.clientId, deploymentId: cfg.deploymentId }; googleClient = new GoogleApiClient(connectionConfig);
+      importUI.reset();
+      if (disconnect() === false) return; connectionConfig = { clientId: cfg.clientId, deploymentId: cfg.deploymentId }; googleClient = new GoogleApiClient(connectionConfig);
       toast(cfg.persisted ? 'Identificadores salvos. Preparando o login Google…' : 'Identificadores disponíveis nesta sessão. Preparando o login Google…');
       await googleClient.prepare(); toast('Pronto. Clique em Conectar Google.'); render();
     } catch (error) { const box = $('#connection-error'); if (box) box.textContent = error.message; toast(error.message, true); }
@@ -420,7 +456,7 @@ document.addEventListener('submit', async event => {
   }
 });
 window.addEventListener('online', updateShell); window.addEventListener('offline', updateShell);
-window.addEventListener('beforeunload', event => { if (modalDirty || state.pending || modalBusy) { event.preventDefault(); event.returnValue = ''; } });
+window.addEventListener('beforeunload', event => { if (modalDirty || state.pending || modalBusy || importUI.hasDraft()) { event.preventDefault(); event.returnValue = ''; } });
 
 // A preparação carrega apenas a biblioteca de login, nunca dados financeiros.
 if (connectionConfig.clientId && connectionConfig.deploymentId) {
