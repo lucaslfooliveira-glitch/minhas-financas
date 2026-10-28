@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#113f35">
+  <meta name="description" content="Organize seu dinheiro, acompanhe seu orçamento e planeje seus próximos meses. Seus dados ficam no seu Google Drive.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://accounts.google.com/gsi/client https://accounts.google.com/gsi/; connect-src 'self' https://script.googleapis.com https://accounts.google.com; frame-src https://accounts.google.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <title>Minhas Finanças</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="./icons/mark.svg">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="./css/tailwind.css">
+  <link rel="stylesheet" href="./css/styles.css">
+  <link rel="stylesheet" href="./css/integration.css">
+  <script defer src="./vendor/chart.umd.min.js"></script>
+  <script defer src="./config.js"></script>
+  <script type="module" src="./js/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Ir para o conteúdo</a>
+
+  <aside id="sidebar" class="sidebar" aria-label="Navegação principal">
+    <a class="brand" href="./" aria-label="Minhas Finanças, início">
+      <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M7 23V14M15.5 23V8M24 23V17" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"/><path d="m20 9 4-4 3 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      <span>Minhas<span class="brand-second">Finanças<span class="brand-dot">.</span></span></span>
+    </a>
+
+    <p class="nav-label">Seu dia a dia</p>
+    <nav class="side-nav" aria-label="Páginas">
+      <button type="button" class="nav-link active" data-view="dashboard" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="1.7"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.7"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.7"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.7"/></svg><span>Visão geral</span></button>
+      <button type="button" class="nav-link" data-view="transactions"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4-4-4 4 4 4"/></svg><span>Lançamentos</span></button>
+      <button type="button" class="nav-link" data-view="planning"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="16" rx="2.5"/><path d="M8 3v4m8-4v4M4 11h16m-11 5 2 2 4-4"/></svg><span>Planejamento</span></button>
+      <button type="button" class="nav-link" data-view="accounts"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h15a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h12v4"/><path d="M21 13h-5v4h5m-3-2h.01"/></svg><span>Contas e patrimônio</span></button>
+    </nav>
+
+    <div class="sidebar-bottom">
+      <div class="ownership-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8.5 11.5 2.5 2.5 4.5-5"/></svg><div><strong>Seus dados são seus</strong><p>Guardados no seu<br>Google Drive pessoal.</p></div></div>
+      <button type="button" class="nav-link" data-view="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 3-.5 2-2 .9-1.9-.6-2 3.4 1.5 1.4-.1 2.3-1.4 1.5 2 3.4 2-.6 2 .9.4 2h4l.5-2 2-.9 1.9.6 2-3.4-1.5-1.5.1-2.2 1.4-1.5-2-3.4-2 .6-2-.9-.4-2H9Z" transform="translate(0 1)"/><circle cx="11.5" cy="12.5" r="3"/></svg><span>Configurações</span></button>
+      <div class="sidebar-caption"><span class="status-dot" aria-hidden="true"></span><span id="connection-status">Aguardando conexão</span></div>
+    </div>
+  </aside>
+
+  <div class="app-layout">
+    <header class="topbar">
+      <div class="mobile-brand"><img src="./icons/mark.svg" width="30" height="30" alt=""><span>Minhas Finanças</span></div>
+      <span class="topbar-caption">Seu orçamento, suas contas e suas metas.</span>
+      <div class="topbar-actions">
+        <button id="privacy-button" class="icon-button" type="button" aria-label="Ocultar valores" title="Ocultar valores" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button>
+        <button id="install-button" class="button secondary small" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4"/></svg>Instalar</button>
+        <button id="connection-button" class="button secondary small" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/></svg><span>Conectar Google</span></button>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <div id="mode-banner" class="notice warning mode-banner" role="status" hidden></div>
+      <div id="offline-banner" class="notice warning" role="status" hidden>Você está sem conexão. Os dados já abertos continuam visíveis; reconecte-se para salvar ou atualizar.</div>
+      <div id="pending-banner" class="notice warning" role="status" hidden></div>
+
+      <div class="page-heading">
+        <div class="page-heading-copy"><p class="eyebrow">SEU DINHEIRO, COM CLAREZA</p><h1 id="view-title">Visão geral</h1><p id="view-description">Uma visão tranquila do presente. Um plano para o que vem.</p></div>
+        <div class="page-heading-actions">
+          <label class="month-control" for="month-select"><span class="sr-only">Mês de referência</span><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="16" rx="2.5"/><path d="M8 3v4m8-4v4M4 11h16"/></svg><input id="month-select" type="month" aria-label="Mês de referência"></label>
+          <button id="refresh-button" class="icon-button bordered" type="button" aria-label="Atualizar dados" title="Atualizar dados"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.5 8A7 7 0 0 1 18 6l2 6M4 12l2 6a7 7 0 0 0 12.5-2"/></svg></button>
+          <button id="new-button" class="button primary" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Novo lançamento</button>
+        </div>
+      </div>
+
+      <main id="main-content" tabindex="-1">
+        <section class="welcome-panel panel">
+          <div class="welcome-art" aria-hidden="true"><svg viewBox="0 0 120 100" fill="none"><rect x="15" y="23" width="87" height="60" rx="13" fill="#d5e9df"/><rect x="24" y="14" width="72" height="58" rx="11" fill="#fff" stroke="#b5d4c3" stroke-width="2"/><path d="M38 55V42m17 13V32m17 23V39" stroke="#2a8a66" stroke-width="6" stroke-linecap="round"/><circle cx="91" cy="72" r="18" fill="#174c3c"/><path d="m84 72 5 5 9-10" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+          <p class="eyebrow">BEM-VINDO AO SEU ESPAÇO</p>
+          <h2>Seu próximo passo começa aqui.</h2>
+          <p>Conecte sua planilha para acompanhar o que entra, o que sai e o que você está construindo.</p>
+          <div class="inline-actions"><button class="button primary" type="button" data-view="settings">Configurar conexão</button><button class="button secondary" type="button" data-action="demo">Conhecer a demonstração</button></div>
+          <p class="field-note">A demonstração usa dados fictícios e não altera sua planilha.</p>
+        </section>
+      </main>
+
+      <footer class="workspace-footer"><span>Minhas Finanças</span><span>Dados financeiros no seu Google Drive.</span></footer>
+    </div>
+  </div>
+
+  <button id="mobile-new-button" class="mobile-new-button" type="button" aria-label="Novo lançamento"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Lançar</span></button>
+  <nav class="mobile-nav" aria-label="Navegação no celular">
+    <button type="button" class="active" data-view="dashboard" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1.2"/><rect x="14" y="4" width="6" height="6" rx="1.2"/><rect x="4" y="14" width="6" height="6" rx="1.2"/><rect x="14" y="14" width="6" height="6" rx="1.2"/></svg><span>Visão geral</span></button>
+    <button type="button" data-view="transactions"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4-4-4 4 4 4"/></svg><span>Extrato</span></button>
+    <button type="button" data-view="planning"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="16" rx="2.5"/><path d="M8 3v4m8-4v4M4 11h16m-11 5 2 2 4-4"/></svg><span>Planejar</span></button>
+    <button type="button" data-view="accounts"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h15a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h12v4"/><path d="M21 13h-5v4h5"/></svg><span>Contas</span></button>
+    <button type="button" data-view="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h14"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="10" cy="18" r="2"/></svg><span>Ajustes</span></button>
+  </nav>
+
+  <dialog id="modal" class="modal" aria-labelledby="modal-title">
+    <div class="modal-heading"><div><p class="eyebrow">MINHAS FINANÇAS</p><h2 id="modal-title">Novo lançamento</h2></div><button id="modal-close" class="icon-button" type="button" aria-label="Fechar janela"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <form id="modal-form">
+      <div id="modal-body" class="modal-body"></div>
+      <footer class="modal-footer"><button id="modal-cancel" class="button secondary" type="button">Cancelar</button><button id="modal-submit" class="button primary" type="submit">Salvar lançamento</button></footer>
+    </form>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
+  <noscript><div class="noscript-note">Ative o JavaScript no navegador para usar o Minhas Finanças.</div></noscript>
+</body>
+</html>
