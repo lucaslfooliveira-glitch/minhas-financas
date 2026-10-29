@@ -1,6 +1,6 @@
 /* Cache exclusivo da interface. Nenhum dado financeiro ou token é armazenado. */
 const CACHE_PREFIX = 'minhas-financas-shell:' + new URL('./', self.location.href).pathname + ':';
-const CACHE = CACHE_PREFIX + 'v1.2.0-importacao';
+const CACHE = CACHE_PREFIX + 'v1.2.1-leitura-itau';
 const SHELL = [
   './', './index.html', './config.js', './manifest.webmanifest',
   './css/tailwind.css', './css/styles.css', './css/integration.css', './css/import.css',

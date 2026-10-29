@@ -1,6 +1,6 @@
 /** Importação revisada: leitura local e gravação em lote após confirmação explícita. */
 import { extractPdfText, parseItauText } from './itauPdfParser.js';
-import { createReview, updateReviewRow, updateReceiptOptions, summarizeReview, buildReviewPlan } from './import-review-model.js';
+import { createReview, updateReviewRow, assignBlockCard, updateReceiptOptions, summarizeReview, buildReviewPlan } from './import-review-model.js';
 import { compareImportRows } from './import-duplicates.js';
 import { buildBatchInsertRequest } from './import-batch.js';
 import { escapeHtml as esc, money, isoDate, today, shiftMonth, parseMoney } from './utils.js';
@@ -20,13 +20,13 @@ const disabled = value => value ? ' disabled' : '';
 const uploadIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5"/></svg>';
 const pageIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H5v18h14V8l-5-5Zm0 0v5h5M8 13h8M8 17h6"/></svg>';
 const dateLabel = value => isoDate(value) ? value.split('-').reverse().join('/') : 'Confirmar data';
-const initialEntry = () => ({ source: 'pdf', due: '', criterion: 'vencimento', text: '', columns: '1', password: '' });
+const initialEntry = () => ({ source: 'pdf', due: '', criterion: 'vencimento', text: '', columns: 'auto', password: '' });
 
 /** getContext() consulta a identidade atual; nunca captura token/cliente anterior. */
 export function createImportReview({ getContext, isActive, notify = () => {} }) {
   let root, attached = false, generation = 0, abortController, fileUrl = '';
   let entry = initialEntry(), file = null, review = null, plan = null;
-  let cardDrafts = {}, receipt = null, saveConfirmed = false;
+  let cardDrafts = {}, blockFinalDrafts = {}, receipt = null, saveConfirmed = false;
   let busy = false, busyKind = '', error = '', progress = '', passwordRequired = false;
   let filter = 'todos', search = '', finalFilter = '', confirmed = false, acknowledged = false, sampleLoaded = false, sourceDirty = false;
   let compareState = { status: 'none', count: 0, total: 0 }, compared = [], cardLinks = {};
@@ -43,7 +43,7 @@ export function createImportReview({ getContext, isActive, notify = () => {} }) 
   function reset() {
     generation++; abortController?.abort(); abortController = null; clearUrl();
     entry = initialEntry(); file = null; review = null; plan = null; busy = false; busyKind = '';
-    cardDrafts = {}; receipt = null; saveConfirmed = false;
+    cardDrafts = {}; blockFinalDrafts = {}; receipt = null; saveConfirmed = false;
     error = ''; progress = ''; passwordRequired = false; filter = 'todos'; search = ''; finalFilter = '';
     confirmed = false; acknowledged = false; sampleLoaded = false; sourceDirty = false; compareState = { status: 'none', count: 0, total: 0 }; compared = []; cardLinks = {};
   }
@@ -60,13 +60,21 @@ export function createImportReview({ getContext, isActive, notify = () => {} }) 
   function cardDraft(final) {
     if (!cardDrafts[final]) {
       const previous = context().cartoes?.find(c => c.final === final);
-      const header = review?.result.blocos.find(b => b.cartao_final === final)?.origem?.texto || '';
+      const row = review?.rows.find(r => r.cartao_final === final);
+      const block = review?.result.blocos.find(b => b.id === row?.bloco_id) || review?.result.blocos.find(b => b.cartao_final === final);
+      const header = block?.origem?.texto || '';
       cardDrafts[final] = { final, apelido: previous?.apelido || `Cartão ${final}`,
         modalidade: previous?.modalidade || (/VIRTUAL/u.test(normalize(header)) ? 'virtual' : /ADICIONAL/u.test(normalize(header)) ? 'adicional' : 'fisico'),
-        responsavel: previous?.responsavel || '', conta_id: cardLinks[final] || previous?.conta_id || '' };
+        responsavel: previous?.responsavel || block?.portador || row?.portador || '', conta_id: cardLinks[final] || previous?.conta_id || '' };
       if (cardDrafts[final].conta_id) cardLinks[final] = cardDrafts[final].conta_id;
     }
     return cardDrafts[final];
+  }
+  function missingCardIdentityForm() {
+    const blocks = review.result.blocos.map(block => ({ block, rows: review.rows.filter(row => row.bloco_id === block.id) }))
+      .filter(({ rows }) => rows.some(row => row.incluir && !/^\d{4}$/u.test(row.cartao_final || '')));
+    if (!blocks.length) return '';
+    return `<section class="panel"><div class="panel-heading"><div><span class="eyebrow">IDENTIFICAÇÃO DO CARTÃO</span><h2>Informe o final que falta</h2><p>Algumas faturas identificam o bloco pelo responsável e não imprimem os quatro últimos dígitos. Confira o cartão antes de preencher.</p></div></div><div class="import-card-grid">${blocks.map(({ block, rows }) => `<fieldset class="import-card-identity"><legend>${esc(block.portador || 'Responsável não identificado')}</legend><p>${rows.length} lançamento(s) neste bloco · final não impresso ou não reconhecido.</p><label class="field">Quatro últimos dígitos<input type="text" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" data-block-final="${esc(block.id)}" value="${esc(blockFinalDrafts[block.id] || '')}" aria-label="Final do cartão de ${esc(block.portador || block.id)}"${disabled(locked())}></label><button type="button" class="button secondary small" data-import-action="apply-block-final" data-block-id="${esc(block.id)}"${disabled(locked())}>Aplicar final aos ${rows.length} itens do bloco</button></fieldset>`).join('')}</div><p class="field-note">A identificação vale também para os itens desmarcados deste bloco. Os valores e as seleções serão preservados.</p></section>`;
   }
   function cardIdentityForm() {
     const finals = [...new Set(review.rows.filter(r => r.incluir && /^\d{4}$/u.test(r.cartao_final || '')).map(r => r.cartao_final))];
@@ -95,7 +103,7 @@ export function createImportReview({ getContext, isActive, notify = () => {} }) 
     return `<section class="panel import-upload" aria-labelledby="import-source-title"><div class="panel-heading"><div><span class="eyebrow">LEITURA DA FATURA ITAÚ</span><h2 id="import-source-title">${review ? 'Arquivo e referência' : 'Comece pela sua fatura'}</h2><p>Confira os lançamentos antes de enviar qualquer dado ao Drive.</p></div>${review ? '<button type="button" class="button ghost small" data-import-action="reset">Nova fatura</button>' : ''}</div>
       <form id="import-source-form" autocomplete="off"><fieldset${disabled(locked())}><div class="import-meta"><label class="field">Vencimento da fatura<input type="date" name="due" value="${esc(entry.due)}" required aria-describedby="import-due-help"><span id="import-due-help" class="field-note">Use a data de vencimento impressa no PDF.</span></label><label class="field">Mês do orçamento<select name="criterion"><option value="vencimento"${selected(entry.criterion, 'vencimento')}>Mês de vencimento · caixa</option><option value="compra"${selected(entry.criterion, 'compra')}>Data original da compra · competência</option></select><span class="field-note">O vencimento continua sendo a data prevista de pagamento.</span></label></div>
       <div class="import-source-tabs inline-actions" role="group" aria-label="Origem da fatura"><button type="button" class="button ${entry.source === 'pdf' ? 'primary' : 'secondary'} small" data-import-action="source-pdf" aria-pressed="${entry.source === 'pdf'}">Arquivo PDF</button><button type="button" class="button ${entry.source === 'texto' ? 'primary' : 'secondary'} small" data-import-action="source-text" aria-pressed="${entry.source === 'texto'}">Colar texto</button></div>
-      ${entry.source === 'pdf' ? `<label class="import-dropzone" id="import-dropzone"><input id="import-file" class="sr-only" type="file" accept="application/pdf,.pdf" aria-label="Selecionar PDF da fatura Itaú"><span class="import-upload-icon">${uploadIcon}</span><strong>${file ? esc(file.name) : 'Escolher PDF da fatura'}</strong><span>${file ? `${(file.size / 1024 / 1024).toFixed(2).replace('.', ',')} MB · clique para trocar` : 'Toque para selecionar ou arraste o arquivo aqui'}</span><small>PDF com texto · até 20 MB · até 80 páginas</small></label><div class="import-meta"><label class="field">Organização do PDF<select name="columns"><option value="1"${selected(entry.columns, '1')}>Uma coluna</option><option value="2"${selected(entry.columns, '2')}>Duas colunas, divididas ao meio</option></select><span class="field-note">Se as compras aparecerem misturadas, ajuste e leia novamente.</span></label>${passwordRequired ? `<label class="field">Senha do PDF<input type="password" name="password" value="" autocomplete="off" required><span class="field-note">Usada somente para abrir este arquivo nesta sessão.</span></label>` : '<p class="import-help">Se o PDF for escaneado ou o layout não for reconhecido, use a opção de colar texto.</p>'}</div>` : context().private ? '<p class="notice">O texto da fatura está oculto. Use Mostrar valores na barra superior para consultar ou editar o texto original.</p>' : `<label class="field import-text-field">Texto da fatura<textarea name="text" rows="8" maxlength="2000000" spellcheck="false" placeholder="Cole o texto mantendo uma compra por linha e os cabeçalhos por final do cartão.">${esc(entry.text)}</textarea><span class="field-note">Inclua os cabeçalhos “final XXXX” e os subtotais de cada cartão.</span></label>`}
+      ${entry.source === 'pdf' ? `<label class="import-dropzone" id="import-dropzone"><input id="import-file" class="sr-only" type="file" accept="application/pdf,.pdf" aria-label="Selecionar PDF da fatura Itaú"><span class="import-upload-icon">${uploadIcon}</span><strong>${file ? esc(file.name) : 'Escolher PDF da fatura'}</strong><span>${file ? `${(file.size / 1024 / 1024).toFixed(2).replace('.', ',')} MB · clique para trocar` : 'Toque para selecionar ou arraste o arquivo aqui'}</span><small>PDF com texto · até 20 MB · até 80 páginas</small></label><div class="import-meta"><label class="field">Organização do PDF<select name="columns"><option value="auto"${selected(entry.columns, 'auto')}>Detectar automaticamente (recomendado)</option><option value="1"${selected(entry.columns, '1')}>Uma coluna (manual)</option><option value="2"${selected(entry.columns, '2')}>Duas colunas ao meio (manual)</option></select><span class="field-note">A detecção automática considera a posição das tabelas em cada página. Use os ajustes manuais somente se necessário.</span></label>${passwordRequired ? `<label class="field">Senha do PDF<input type="password" name="password" value="" autocomplete="off" required><span class="field-note">Usada somente para abrir este arquivo nesta sessão.</span></label>` : '<p class="import-help">Se o PDF for escaneado ou o layout não for reconhecido, use a opção de colar texto.</p>'}</div>` : context().private ? '<p class="notice">O texto da fatura está oculto. Use Mostrar valores na barra superior para consultar ou editar o texto original.</p>' : `<label class="field import-text-field">Texto da fatura<textarea name="text" rows="8" maxlength="2000000" spellcheck="false" placeholder="Cole o texto mantendo uma compra por linha e os cabeçalhos por final do cartão.">${esc(entry.text)}</textarea><span class="field-note">Inclua os cabeçalhos “final XXXX” e os subtotais de cada cartão.</span></label>`}
       <div class="inline-actions"><button type="submit" class="button primary">${review ? 'Ler novamente' : 'Ler fatura'}</button><button type="button" class="button secondary" data-import-action="sample">Experimentar exemplo fictício</button>${fileUrl ? `<a class="button ghost small" href="${esc(fileUrl)}" target="_blank" rel="noopener noreferrer">Abrir PDF original</a>` : ''}</div></fieldset></form>
       <p class="import-privacy">◈ A leitura ocorre no seu navegador. O arquivo e a revisão ficam somente nesta sessão.</p>
       ${busy ? `<div class="import-status" role="status"><span class="spinner" aria-hidden="true"></span><span>${esc(progress || 'Preparando leitura…')}</span>${busyKind !== 'save' ? '<button type="button" class="button secondary small" data-import-action="cancel">Cancelar</button>' : ''}</div>` : ''}
@@ -109,7 +117,15 @@ export function createImportReview({ getContext, isActive, notify = () => {} }) 
     return context().read ? 'Compare com sua planilha para localizar lançamentos semelhantes.' : 'Sem comparação com a planilha. Conecte sua conta para verificar os lançamentos existentes.';
   }
   function cardChecks() {
-    return `<section aria-labelledby="import-check-title"><div class="panel-heading"><div><h2 id="import-check-title">Conferência por cartão</h2><p>Os selos comparam os itens extraídos com o subtotal do PDF, antes das suas edições.</p></div></div><div class="import-card-grid">${review.result.blocos.map(b => `<article class="import-card-check ${esc(b.status)}"><h3>Cartão ${b.cartao_final ? '•••• ' + esc(b.cartao_final) : 'não identificado'}</h3><span class="badge ${b.status === 'validado' ? 'success' : 'warning'}">${esc(b.selo)}</span><p>Extraído <strong>${M(b.soma_centavos)}</strong> · PDF <strong>${b.subtotal_centavos === null ? 'não identificado' : M(b.subtotal_centavos)}</strong></p>${b.diferenca_centavos ? `<small class="import-diff">Diferença: ${M(b.diferenca_centavos)}</small>` : ''}</article>`).join('')}</div><p class="field-note">Soma validada não confirma datas, categorias ou duplicidade. Ao ignorar ou editar itens, o total selecionado pode mudar.</p></section>`;
+    const original = review.result.resumo;
+    const invoiceCheck = Number.isSafeInteger(original?.total_fatura_centavos)
+      ? '<p class="notice '+(original.soma_validada ? 'success' : 'warning')+'">Total extraído do PDF: <strong>'+M(original.total_centavos)+'</strong> · Total impresso da fatura: <strong>'+M(original.total_fatura_centavos)+'</strong> · '+(original.soma_validada ? 'Soma da fatura conferida.' : original.diferenca_fatura_centavos === 0 ? 'Totais coincidem; confira os alertas.' : 'Há diferença na leitura; confira o PDF.')+'</p>' : '';
+    return `<section aria-labelledby="import-check-title"><div class="panel-heading"><div><h2 id="import-check-title">Conferência por cartão</h2><p>Os selos comparam os itens extraídos com o subtotal do PDF, antes das suas edições.</p></div></div>${invoiceCheck}<div class="import-card-grid">${review.result.blocos.map(b => {
+      const finals = [...new Set(review.rows.filter(r => r.bloco_id === b.id && /^\d{4}$/u.test(r.cartao_final || '')).map(r => r.cartao_final))];
+      const title = b.portador || (b.cartao_final ? 'Cartão •••• ' + b.cartao_final : 'Bloco de cartão');
+      const identity = b.cartao_final ? 'Final identificado no PDF: •••• ' + b.cartao_final : finals.length === 1 ? 'Final informado na revisão: •••• ' + finals[0] : 'Final não impresso ou não reconhecido';
+      return `<article class="import-card-check ${esc(b.status)}"><h3>${esc(title)}</h3><p class="field-note">${esc(identity)}</p><span class="badge ${b.status === 'validado' ? 'success' : 'warning'}">${esc(b.selo)}</span><p>Extraído <strong>${M(b.soma_centavos)}</strong> · PDF <strong>${b.subtotal_centavos === null ? 'não identificado' : M(b.subtotal_centavos)}</strong></p>${b.diferenca_centavos ? `<small class="import-diff">Diferença: ${M(b.diferenca_centavos)}</small>` : ''}</article>`;
+    }).join('')}</div><p class="field-note">Soma validada não confirma datas, categorias, identificação do cartão ou duplicidade. Ao ignorar ou editar itens, o total selecionado pode mudar.</p></section>`;
   }
   function visibleRows(summary) {
     const problemIds = new Set(summary.problems.map(p => p.id));
@@ -142,7 +158,7 @@ export function createImportReview({ getContext, isActive, notify = () => {} }) 
   }
   function resultView() {
     const summary = summarizeReview(review);
-    return `<div class="import-kpis" aria-label="Resumo dos itens selecionados"><article><span>Compras e encargos</span><strong>${M(summary.expenseCents)}</strong></article><article><span>Estornos e créditos</span><strong>${M(summary.creditCents)}</strong></article><article><span>Total selecionado</span><strong>${M(summary.totalCents)}</strong></article><article><span>Parcelas futuras opcionais</span><strong>${summary.projectionCount}</strong><small>${M(summary.projectionCents)} estimados</small></article></div>${cardChecks()}${cardIdentityForm()}<section class="panel import-comparison"><div class="panel-heading"><div><h3>Possíveis duplicidades</h3><p>${esc(comparisonNote())}</p></div><button type="button" class="button secondary small" data-import-action="compare"${disabled(locked() || !context().read)}>Comparar com a planilha</button></div>${!context().read ? '<p class="field-note">Você pode revisar a fatura agora. A conferência completa será necessária antes de salvar.</p>' : ''}</section>${reviewTable(summary)}${extractionDetails()}${plan || receipt ? resultPanel(summary) : footer(summary)}`;
+    return `<div class="import-kpis" aria-label="Resumo dos itens selecionados"><article><span>Compras e encargos</span><strong>${M(summary.expenseCents)}</strong></article><article><span>Estornos e créditos</span><strong>${M(summary.creditCents)}</strong></article><article><span>Total selecionado</span><strong>${M(summary.totalCents)}</strong></article><article><span>Parcelas futuras opcionais</span><strong>${summary.projectionCount}</strong><small>${M(summary.projectionCents)} estimados</small></article></div>${cardChecks()}${missingCardIdentityForm()}${cardIdentityForm()}<section class="panel import-comparison"><div class="panel-heading"><div><h3>Possíveis duplicidades</h3><p>${esc(comparisonNote())}</p></div><button type="button" class="button secondary small" data-import-action="compare"${disabled(locked() || !context().read)}>Comparar com a planilha</button></div>${!context().read ? '<p class="field-note">Você pode revisar a fatura agora. A conferência completa será necessária antes de salvar.</p>' : ''}</section>${reviewTable(summary)}${extractionDetails()}${plan || receipt ? resultPanel(summary) : footer(summary)}`;
   }
   function render() {
     if (!root || !isActive()) return;
@@ -178,11 +194,11 @@ export function createImportReview({ getContext, isActive, notify = () => {} }) 
     if (review && !confirmDiscard('Ler novamente substitui as edições desta revisão. Continuar?')) return;
     const mine = ++generation;
     abortController = new AbortController(); busy = true; busyKind = 'read'; error = ''; progress = 'Lendo a fatura…';
-    review = null; invalidate(); acknowledged = false; compareState = { status: 'none', count: 0, total: 0 }; compared = []; render();
+    review = null; blockFinalDrafts = {}; invalidate(); acknowledged = false; compareState = { status: 'none', count: 0, total: 0 }; compared = []; render();
     try {
       const extracted = entry.source === 'texto' ? entry.text : await extractPdfText(file, {
         password: entry.password || undefined, signal: abortController.signal,
-        columnBreaks: entry.columns === '2' ? [0.5] : [],
+        columnBreaks: entry.columns === 'auto' ? 'auto' : entry.columns === '2' ? [0.5] : [],
         onProgress: ({ pagina, total }) => { if (mine === generation) { progress = `Lendo página ${pagina} de ${total}…`; render(); } },
       });
       const result = await parseItauText(extracted, { vencimento: entry.due, criterioMes: entry.criterion, categorias: categories(), regras: context().regras || [], seriesExistentes: context().parcelamentos || [] });
@@ -250,7 +266,7 @@ export function createImportReview({ getContext, isActive, notify = () => {} }) 
     };
     review = null; invalidate(); await readSource();
   }
-  async function action(name) {
+  async function action(name, blockId) {
     if (name === 'cancel') { if (busyKind === 'save' || context().pending) return; generation++; abortController?.abort(); busy = false; busyKind = ''; error = 'Operação cancelada. Nenhum dado foi salvo.'; render(); return; }
     if (locked()) return;
     if (name === 'reset') { if (confirmDiscard()) { reset(); render(); } return; }
@@ -262,6 +278,14 @@ export function createImportReview({ getContext, isActive, notify = () => {} }) 
     if (name === 'sample') return sample();
     if (name === 'compare') return compare();
     if (!review) return;
+    if (name === 'apply-block-final') {
+      const count = assignBlockCard(review, blockId, blockFinalDrafts[blockId] || '');
+      delete blockFinalDrafts[blockId];
+      if (compared.length) markDuplicates();
+      invalidate(); staleComparison(); render();
+      feedback(count + ' itens identificados. Confira a conta e o responsável deste cartão.');
+      return;
+    }
     if (name === 'confirm-dates') {
       for (const row of review.rows.filter(r => r.incluir)) {
         const date = row.data_compra || row.data_compra_sugerida;
@@ -302,6 +326,7 @@ export function createImportReview({ getContext, isActive, notify = () => {} }) 
     if (!target.closest('#import-review-root') || locked()) return;
     try {
       if (target.id === 'import-file') { void chooseFile(target.files?.[0]); return; }
+      if (target.dataset.blockFinal) { blockFinalDrafts[target.dataset.blockFinal] = target.value; return; }
       if (target.dataset.cardField && target.dataset.cardFinal) {
         const final = target.dataset.cardFinal, field = target.dataset.cardField;
         if (!['apelido', 'modalidade', 'responsavel', 'conta_id'].includes(field)) return;
@@ -345,6 +370,7 @@ export function createImportReview({ getContext, isActive, notify = () => {} }) 
     root.addEventListener('input', event => {
       const target = event.target;
       if (!target.closest('#import-review-root') || locked()) return;
+      if (target.dataset.blockFinal) { blockFinalDrafts[target.dataset.blockFinal] = target.value; return; }
       if (target.dataset.cardFinal && ['apelido','responsavel'].includes(target.dataset.cardField)) {
         cardDraft(target.dataset.cardFinal)[target.dataset.cardField] = target.value;
         invalidate(); review.revision++;
@@ -368,7 +394,7 @@ export function createImportReview({ getContext, isActive, notify = () => {} }) 
     root.addEventListener('submit', event => { if (event.target.id === 'import-source-form') { event.preventDefault(); void readSource(); } });
     root.addEventListener('click', event => {
       const button = event.target.closest('[data-import-action]');
-      if (button) void Promise.resolve(action(button.dataset.importAction)).catch(e => { feedback(e.message, true); render(); });
+      if (button) void Promise.resolve(action(button.dataset.importAction, button.dataset.blockId)).catch(e => { feedback(e.message, true); render(); });
     });
     root.addEventListener('dragover', event => { const zone = event.target.closest('#import-dropzone'); if (zone) { event.preventDefault(); if (!locked()) zone.classList.add('dragging'); } });
     root.addEventListener('dragleave', event => event.target.closest('#import-dropzone')?.classList.remove('dragging'));

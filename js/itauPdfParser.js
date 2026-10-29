@@ -13,10 +13,10 @@ export const REGEXES = Object.freeze({
   // Data só NO INÍCIO. Assim o 02/06 de AMAZON 02/06 não vira outra compra.
   data: /^(\d{2})\/(\d{2})(?:\/(\d{4}))?(?=\s|$)\s*(.*)$/u,
   // Parcela no corpo, preferencialmente final da descrição; validate 1 <= n <= total.
-  parcela: /(?:^|\s)(\d{1,2})\s*\/\s*(\d{1,2})(?=\s|$)/gu,
+  parcela: /(?<![\d/])(\d{1,2})\s*\/\s*(\d{1,2})(?=\s|$)/gu,
   cartao: /\bFINAL\s*[:*.\-]?\s*(\d{4})\b/u,
   // Verificada ANTES dos créditos: uma fatura paga nunca entra como receita.
-  pagamento: /\b(?:PAGAMENTO (?:EFETUADO|RECEBIDO|DE FATURA|DA FATURA)|DEBITO AUTOMATICO(?: DE| DA)? FATURA|PGTO(?: DE| DA)? FATURA|PAGTO(?: DE| DA)? FATURA)\b/u,
+  pagamento: /\b(?:PAGAMENTO (?:EFETUADO|RECEBIDO|DE FATURA|DA FATURA)|PAGAMENTO(?=\s*(?:R\$\s*)?[+-]?\s*(?:\d[\d.]*,\d{2}(?:\s*(?:CR|C|D))?)?\s*$)|DEBITO AUTOMATICO(?: DE| DA)? FATURA|PGTO(?: DE| DA)? FATURA|PAGTO(?: DE| DA)? FATURA)\b/u,
   // Marcador de operação no início; "DROGARIA DESCONTO" é nome de loja.
   credito: /^(?:ESTORNO|CREDITO|CREDITOS|DESCONTO|CASHBACK|DEVOLUCAO|REEMBOLSO)\b/u,
   iof: /\bIOF\b/u,
@@ -98,7 +98,7 @@ function purchaseDate(match, vencimento, installment) {
 }
 
 /** Regras aprendidas têm precedência. Marketplace não implica necessidade. */
-export function suggestCategory(description, { regras = [], categorias = [] } = {}) {
+export function suggestCategory(description, { regras = [], categorias = [], categoriaBanco = '' } = {}) {
   const merchant = normalize(description);
   const learned = regras.filter(r => r.ativa !== false && normalize(r.estabelecimento) === merchant);
   if (learned.length === 1 && GROUPS.has(learned[0].grupo_orcamento)) {
@@ -114,9 +114,11 @@ export function suggestCategory(description, { regras = [], categorias = [] } = 
     [/\b(?:NETFLIX|SPOTIFY|DISNEY|HBO|PRIME VIDEO)\b/u, 'Assinaturas', 'desejos'],
     [/\b(?:AMAZON|MERCADOLIVRE|MERCADO LIVRE|SHOPEE)\b/u, 'Compras a classificar', null],
   ];
-  const found = dictionary.find(([re]) => re.test(merchant));
+  const bank = { SUPERMERCADO: ['Supermercado', 'necessidades'], SUPERMARKET: ['Supermercado', 'necessidades'], SAUDE: ['Saúde', 'necessidades'], TRANSPORTE: ['Transporte', 'necessidades'], RESTAURANTE: ['Alimentação fora de casa', 'desejos'] }[normalize(categoriaBanco)];
+  const found = dictionary.find(([re]) => re.test(merchant)) || (bank ? [null, ...bank] : null);
   const name = found?.[1] || 'Não categorizado';
-  const category = categorias.find(c => c.ativa !== false && normalize(c.nome) === normalize(name) && c.tipo_movimentacao !== 'receita' && c.tipo_movimentacao !== 'aporte');
+  const names = [name, ...({ Supermercado: ['Alimentação'], 'Encargos do cartão': ['Juros e tarifas'] }[name] || [])].map(normalize);
+  const category = names.map(n => categorias.find(c => c.ativa !== false && normalize(c.nome) === n && (!c.tipo_movimentacao || c.tipo_movimentacao === 'despesa'))).find(Boolean);
   return { id: category?.id || null, nome: category?.nome || name, grupo_orcamento: category?.grupo_orcamento || found?.[2] || null, origem: found ? 'dicionario' : 'nenhuma', revisar: true };
 }
 
@@ -129,12 +131,62 @@ export async function fingerprint(value) {
 }
 
 /**
- * Geometria PDF.js -> linhas. Não pressupõe que items[] esteja em ordem de leitura.
- * columnBreaks=[0.5] separa manualmente duas colunas em uma página não rotacionada.
- * Sem ajuste, duas datas na mesma linha geram alerta; não fundimos compras.
+ * Encontra o espaço entre tabelas pelos cabeçalhos, não pelo meio da página.
+ * DATA + ESTABELECIMENTO + VALOR EM R$ precisam formar tabelas completas e
+ * conter datas nas mesmas âncoras. Valores/somatórios nunca escolhem o corte.
  */
-export function textItemsToLines(items, { page = 1, width = 595, columnBreaks = [], yTolerance = 2 } = {}) {
-  if (!Array.isArray(columnBreaks) || columnBreaks.some((n, i) => n <= 0 || n >= 1 || (i > 0 && n <= columnBreaks[i - 1]))) throw new Error('Divisões de coluna inválidas. Use frações crescentes entre 0 e 1.');
+export function detectColumnBreaks(items, { width = 595, yTolerance = 2 } = {}) {
+  if (!Array.isArray(items) || !Number.isFinite(width) || width <= 0) throw new Error('Geometria do PDF inválida.');
+  const parts = items.filter(p => typeof p.str === 'string' && p.str.trim() && Number.isFinite(p.transform?.[4]) && Number.isFinite(p.transform?.[5]))
+    .map(p => ({ text: normalize(p.str), x: p.transform[4], y: p.transform[5], endX: p.transform[4] + (Number(p.width) || 0) }));
+  const dates = parts.filter(p => p.text === 'DATA');
+  const headers = [];
+  for (const date of dates) {
+    const nextX = Math.min(width, ...dates.filter(p => p.x > date.x + 3).map(p => p.x));
+    const sameLine = parts.filter(p => Math.abs(p.y - date.y) <= yTolerance && p.x > date.x + 3 && p.x < nextX - 2).sort((a, b) => a.x - b.x);
+    const description = sameLine.find(p => /^(?:ESTABELECIMENTO|DESCRICAO(?: DO ESTABELECIMENTO)?)$/u.test(p.text));
+    const value = description && sameLine.find(p => p.x > description.x && /^VALOR(?: EM)?\s*\(?R\$\)?$/u.test(p.text));
+    if (value) headers.push({ x: date.x, endX: value.endX });
+  }
+  // Alguns geradores mantêm o cabeçalho inteiro em um único item PDF.js.
+  for (const p of parts) if (/^DATA\s+(?:ESTABELECIMENTO|DESCRICAO)\b.*\bVALOR(?: EM)?\s*\(?R\$\)?$/u.test(p.text)) headers.push({ x: p.x, endX: p.endX });
+  const columns = [];
+  for (const header of headers.sort((a, b) => a.x - b.x)) {
+    let column = columns.find(c => Math.abs(c.x - header.x) <= 2);
+    if (!column) { column = { x: header.x, endX: header.endX }; columns.push(column); }
+    column.endX = Math.max(column.endX, header.endX);
+  }
+  if (columns.length < 2 || columns.length > 4) return [];
+  const isDate = p => /^\d{2}\/\d{2}(?:\/\d{4})?(?:\s|$)/u.test(p.text);
+  if (columns.some(c => parts.filter(p => isDate(p) && Math.abs(p.x - c.x) <= 3).length < 2)) return [];
+  const breaks = [];
+  for (let i = 0; i < columns.length - 1; i++) {
+    const left = columns[i], right = columns[i + 1];
+    if (right.x - left.x < width * 0.15) return [];
+    let endX = left.endX;
+    // Confirma também o extremo dos valores das linhas alinhadas com DATA.
+    const lineDates = parts.filter(p => isDate(p) && Math.abs(p.x - left.x) <= 3);
+    for (const date of lineDates) {
+      const amounts = parts.filter(p => p.x >= left.x && p.x < right.x && Math.abs(p.y - date.y) <= yTolerance && /(?:^|\s)(?:R\$\s*)?[+-]?\s*(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2}(?:\s*(?:CR|C|D))?$/u.test(p.text));
+      for (const amount of amounts) endX = Math.max(endX, amount.endX);
+    }
+    if (right.x - endX < Math.max(6, width * 0.008)) return [];
+    const split = (endX + right.x) / (2 * width);
+    if (!(split > 0 && split < 1)) return [];
+    breaks.push(split);
+  }
+  return breaks;
+}
+
+/**
+ * Geometria PDF.js -> linhas. Não pressupõe ordem em items[]. O modo automático
+ * detecta tabelas por página; [] força uma coluna e [0.5] mantém o ajuste manual.
+ */
+export function textItemsToLines(items, { page = 1, width = 595, columnBreaks = 'auto', yTolerance = 2 } = {}) {
+  if (!Array.isArray(items) || !Number.isFinite(width) || width <= 0) throw new Error('Geometria do PDF inválida.');
+  const automatic = columnBreaks === 'auto';
+  const breaks = automatic ? detectColumnBreaks(items, { width, yTolerance }) : columnBreaks;
+  if (!Array.isArray(breaks) || breaks.some((n, i) => !Number.isFinite(n) || n <= 0 || n >= 1 || (i > 0 && n <= breaks[i - 1]))) throw new Error('Divisões de coluna inválidas. Use frações crescentes entre 0 e 1.');
   const rows = [];
   const warnings = [];
   for (const item of items) {
@@ -142,7 +194,7 @@ export function textItemsToLines(items, { page = 1, width = 595, columnBreaks = 
     const x = item.transform?.[4];
     const y = item.transform?.[5];
     if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('PDF sem coordenadas de texto utilizáveis. Use o texto colado.');
-    const column = columnBreaks.filter(f => x >= f * width).length;
+    const column = breaks.filter(f => x >= f * width).length;
     let row = rows.find(r => r.column === column && Math.abs(r.y - y) <= yTolerance);
     if (!row) { row = { column, y, parts: [] }; rows.push(row); }
     row.parts.push({ str: item.str, x, width: Number(item.width) || 0, height: Number(item.height) || 0 });
@@ -155,18 +207,25 @@ export function textItemsToLines(items, { page = 1, width = 595, columnBreaks = 
     for (const part of row.parts) {
       const gap = prior ? part.x - (prior.x + prior.width) : 0;
       // Não acrescentar espaço entre glifos adjacentes (ex.: "1.234,56").
-      const space = prior && gap > Math.max(1, Math.min(prior.height || 8, part.height || 8) * 0.16);
+      const dateToken = /^\d{2}\/\d{2}(?:\/\d{4})?$/u;
+      const structuralBoundary = prior && (dateToken.test(prior.str.trim()) && /^[\p{L}]/u.test(part.str.trim()) || dateToken.test(part.str.trim()) && /[\p{L}]/u.test(prior.str));
+      const space = prior && (gap > Math.max(1, Math.min(prior.height || 8, part.height || 8) * 0.16) || structuralBoundary);
       text += (space ? ' ' : '') + part.str;
       prior = part;
     }
     text = cleanLine(text);
-    const dates = text.match(/(?:^|\s)\d{2}\/\d{2}(?:\/\d{4})?(?=\s)/gu) || [];
-    if (!columnBreaks.length && dates.length > 1 && row.parts.some((p, j) => j && p.x - row.parts[j - 1].x > width * 0.25)) {
+    const starts = row.parts.flatMap((part, index) => {
+      const match = part.str.trim().match(/^\d{2}\/\d{2}(?:\/\d{4})?(?=\s|$)\s*/u);
+      return match ? [{ part, index, suffix: part.str.trim().slice(match[0].length) }] : [];
+    });
+    const purchaseStarts = starts.filter((start, j) => /[\p{L}]/u.test(start.suffix) || row.parts.slice(start.index + 1, starts[j + 1]?.index ?? row.parts.length).some(p => /[\p{L}]/u.test(p.str) && !/^(?:R\$|US\$|USD|EUR|CR|C|D)$/u.test(normalize(p.str))));
+    if (!breaks.length && purchaseStarts.length > 1 && purchaseStarts.some((p, j) => j && p.part.x - purchaseStarts[j - 1].part.x > width * 0.25)) {
       warnings.push(warning('COLUNAS_AMBIGUAS', 'Há duas colunas ou datas na mesma linha. Ajuste columnBreaks e confira o PDF.', { pagina: page, linha: i + 1 }));
     }
-    return { page, column: row.column, line: i + 1, text };
+    return { page, column: row.column, line: i + 1, text, x: row.parts[0].x, y: row.y,
+      endX: Math.max(...row.parts.map(p => p.x + p.width)), height: Math.max(...row.parts.map(p => p.height)) };
   });
-  return { lines, warnings };
+  return { lines, warnings, layout: { automatic, columnBreaks: breaks.slice(), columns: breaks.length + 1 } };
 }
 
 /**
@@ -176,7 +235,7 @@ export function textItemsToLines(items, { page = 1, width = 595, columnBreaks = 
  */
 export async function extractPdfText(file, {
   pdfjsLib, password, onPassword, signal, maxBytes = 20 * 1024 * 1024,
-  maxPages = 80, columnBreaks = [], onProgress,
+  maxPages = 80, columnBreaks = 'auto', onProgress,
 } = {}) {
   if (signal?.aborted) throw new DOMException('Leitura cancelada.', 'AbortError');
   if (file?.size > maxBytes || file?.byteLength > maxBytes) throw new Error('PDF excede o limite de tamanho.');
@@ -210,7 +269,7 @@ export async function extractPdfText(file, {
         if (page.rotate) result.warnings.push(warning('PAGINA_ROTACIONADA', 'Confira a ordem do texto desta página rotacionada.', { pagina: n }));
         if (!result.lines.length) result.warnings.push(warning('PAGINA_SEM_TEXTO', 'Página sem texto extraível. Pode exigir OCR; não foi lida automaticamente.', { pagina: n }));
         lines.push(...result.lines); warnings.push(...result.warnings);
-        pages.push({ numero: n, linhas: result.lines.length });
+        pages.push({ numero: n, linhas: result.lines.length, layout: result.layout });
         onProgress?.({ pagina: n, total: pdf.numPages });
       } finally { page.cleanup?.(); }
     }
@@ -246,6 +305,49 @@ function detectInstallment(description) {
   return { description: cleanLine(description.slice(0, m.index) + ' ' + description.slice(m.index + m[0].length)), installment: { current, total }, ambiguous: false };
 }
 
+const TRANSACTION_SECTION = /^(?:LANCAMENTOS(?: ATUAIS)?(?:\s*:\s*COMPRAS E SAQUES)?|COMPRAS E SAQUES|DESPESAS DO CARTAO)\s*$/u;
+const TRANSACTION_COLUMNS = /^DATA\s+ESTABELECIMENTO\s+VALOR\s+EM\s+R\$/u;
+const CARD_SUBTOTAL = /^(?:SUBTOTAL\b|TOTAL (?:DO|DESTE) CARTAO\b|LANCAMENTOS NO CARTAO\b)/u;
+const INVOICE_TOTAL = /(?:TOTAL (?:DESTA|DA) FATURA(?! ANTERIOR)|TOTAL DOS LANCAMENTOS ATUAIS|(?:^|\s)LANCAMENTOS ATUAIS)\b/u;
+const BANK_DETAIL = /^(OUTROS|SERVICOS|SUPERMERCADO|SUPERMARKET|SAUDE|EDUCACAO|VESTUARIO|RESTAURANTE|HOTEL|TRANSPORTE)\s+([\p{L} .'-]+)$/u;
+
+/** A capa informa identidade e totais; nunca abre uma área de compras. */
+function invoiceMetadata(rows) {
+  const cards = [], totals = new Set(), dues = new Set();
+  let holder = '';
+  for (const row of rows) {
+    const norm = normalize(row.text);
+    const name = row.text.match(/^Titular\s+([\p{L} .'’-]+)$/iu);
+    if (name) holder = cleanLine(name[1]);
+    const masked = norm.match(/\bCARTAO\b.*?(?:[X*•●]{2,}[ .-]*)+(\d{4})\b/u);
+    if (masked && holder && !cards.some(c => c.final === masked[1] && c.portador === holder)) cards.push({ final: masked[1], portador: holder });
+    if (INVOICE_TOTAL.test(norm)) {
+      const amounts = moneyTokens(row.text);
+      if (amounts.length === 1 && amounts[0].cents >= 0) totals.add(amounts[0].cents);
+    }
+    const due = norm.match(/\bVENCIMENTO\s*:?\s*(\d{2})\/(\d{2})\/(\d{4})\b/u);
+    if (due && validDate(`${due[3]}-${due[2]}-${due[1]}`)) dues.add(`${due[3]}-${due[2]}-${due[1]}`);
+  }
+  return { cartoes: cards, total_centavos: totals.size === 1 ? [...totals][0] : null, totais_ambiguos: totals.size > 1,
+    vencimento_impresso: dues.size === 1 ? [...dues][0] : null };
+}
+
+function holderHeading(row, next) {
+  const norm = normalize(row.text);
+  return next && row.page === next.page && row.column === next.column && TRANSACTION_COLUMNS.test(normalize(next.text)) &&
+    row.text === row.text.toLocaleUpperCase('pt-BR') && /^[\p{L}]+(?:[ .'-]+[\p{L}]+){1,11}$/u.test(row.text) &&
+    !TRANSACTION_SECTION.test(norm) && !REGEXES.futuro.test(norm) && !REGEXES.informativo.test(norm);
+}
+
+function cardForHolder(name, metadata) {
+  const n = normalize(name);
+  const matches = metadata.cartoes.filter(c => {
+    const full = normalize(c.portador), shorter = Math.min(full.length, n.length);
+    return n === full || shorter >= 20 && shorter / Math.max(full.length, n.length) >= .75 && (full.startsWith(n) || n.startsWith(full));
+  });
+  return matches.length === 1 ? matches[0].final : null;
+}
+
 /**
  * Máquina de estados: cabeçalho final XXXX abre bloco; subtotal fecha bloco.
  * Repetição do cabeçalho em outra página continua o MESMO bloco ainda aberto.
@@ -257,12 +359,14 @@ export async function parseItauText(input, options = {}) {
   if (!validDate(vencimento)) throw new Error('Informe o vencimento completo da fatura (AAAA-MM-DD).');
   if (!['vencimento', 'compra'].includes(criterioMes)) throw new Error('Critério de mês inválido.');
   const rows = makeRows(input);
+  const metadata = invoiceMetadata(rows);
   const lancamentos = [], ignorados = [], pendencias = [], blocos = [];
   const extractionWarnings = typeof input === 'string' ? [] : input.warnings || [];
   for (const w of extractionWarnings) pendencias.push({ ...w });
-  let current = null, section = 'atual', pending = null;
-  const startBlock = (card, row) => {
-    const block = { id: `bloco-${blocos.length + 1}`, cartao_final: card, origem: origin(row), indices: [], pendencias: [], subtotal_centavos: null, fechado: false };
+  const structuredStatement = rows.some(r => /^LANCAMENTOS\s*:\s*COMPRAS E SAQUES\s*$/u.test(normalize(r.text)));
+  let current = null, section = structuredStatement ? 'fora' : 'atual', pending = null, lastExpense = null;
+  const startBlock = (card, row, holder = null) => {
+    const block = { id: `bloco-${blocos.length + 1}`, cartao_final: card, portador: holder, origem: origin(row), indices: [], pendencias: [], subtotal_centavos: null, fechado: false };
     blocos.push(block); current = block;
     return block;
   };
@@ -292,7 +396,7 @@ export async function parseItauText(input, options = {}) {
       incluir: true, descricao: amount.description, descricao_base: installment.description,
       valor_centavos: cents, natureza: credit ? 'estorno' : REGEXES.iof.test(normalize(amount.description)) ? 'iof' : 'despesa',
       efeito_financeiro: credit ? 'reducao_despesa' : 'despesa', forma_pagamento: 'credito',
-      cartao_final: block.cartao_final, data_texto: `${match[1]}/${match[2]}${match[3] ? '/' + match[3] : ''}`,
+      cartao_final: block.cartao_final, portador: block.portador, data_texto: `${match[1]}/${match[2]}${match[3] ? '/' + match[3] : ''}`,
       data_compra: date.value, data_compra_sugerida: date.suggested, ano_inferido: date.inferred,
       data_vencimento: vencimento, mes_fatura: vencimento.slice(0, 7), criterio_mes: criterioMes,
       mes_orcamento: criterioMes === 'vencimento' ? vencimento.slice(0, 7) : date.value?.slice(0, 7) || null,
@@ -302,36 +406,45 @@ export async function parseItauText(input, options = {}) {
       categoria_sugerida: suggestCategory(installment.description.replace(/^ESTORNO\s+/iu, ''), { regras, categorias }),
       id_parcelamento: null, id_parcelamento_sugerido: null, hash: null, chave_ocorrencia: null,
       possivel_duplicado: false, duplicidade_motivos: [], avisos,
-      // Estorno sem vínculo original exige resolução no importador do backend futuro.
+      // Crédito sem vínculo original permanece redução de despesa no lote.
       estorno_de_id: null, exige_revisao: true,
     };
-    block.indices.push(lancamentos.length); lancamentos.push(item);
+    block.indices.push(lancamentos.length); lancamentos.push(item); lastExpense = item;
   };
 
-  for (const row of rows) {
+  if (metadata.vencimento_impresso && metadata.vencimento_impresso !== vencimento) pendencias.push(warning('VENCIMENTO_DIVERGENTE', 'O vencimento informado difere do impresso no PDF. Confira a referência antes de importar.', { vencimento_impresso: metadata.vencimento_impresso }));
+  if (metadata.totais_ambiguos) pendencias.push(warning('TOTAL_FATURA_AMBIGUO', 'Foram encontrados totais de fatura diferentes. Confira o resumo original.'));
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex];
     const text = row.text, norm = normalize(text), dated = text.match(REGEXES.data);
     // Excluir pagamento ANTES de qualquer análise de sinal/receita.
     if (REGEXES.pagamento.test(norm)) {
       flush(); ignorados.push({ ...origin(row), motivo: 'pagamento_fatura' }); continue;
     }
     if (!dated && REGEXES.futuro.test(norm)) {
-      flush(); section = 'futuro'; ignorados.push({ ...origin(row), motivo: 'projecao_ou_oferta_da_fatura' }); continue;
+      flush(); lastExpense = null; section = 'futuro'; ignorados.push({ ...origin(row), motivo: 'projecao_ou_oferta_da_fatura' }); continue;
     }
     const header = !dated && norm.match(REGEXES.cartao);
     if (header) {
       flush();
       // Um cartão também aparece no resumo de próximas faturas. Seu cabeçalho
       // não transforma projeções/ofertas em lançamentos da fatura atual.
-      if (section === 'futuro') { ignorados.push({ ...origin(row), motivo: 'projecao_ou_oferta_da_fatura' }); continue; }
+      if (section !== 'atual') { ignorados.push({ ...origin(row), motivo: section === 'futuro' ? 'projecao_ou_oferta_da_fatura' : 'identidade_da_capa' }); continue; }
       if (!current || current.fechado || current.cartao_final !== header[1]) startBlock(header[1], row);
       continue;
     }
-    // Cabeçalhos de lançamentos retomam leitura após resumo/projeção.
-    if (!dated && /^(?:LANCAMENTOS(?: ATUAIS)?|COMPRAS E SAQUES|DESPESAS DO CARTAO)(?:\b|$)/u.test(norm) && !REGEXES.futuro.test(norm)) {
-      flush(); section = 'atual'; continue;
+    if (!dated && section === 'atual' && holderHeading(row, rows[rowIndex + 1])) {
+      flush(); lastExpense = null;
+      const card = cardForHolder(text, metadata);
+      if (!current || current.fechado || normalize(current.portador) !== norm) startBlock(card, row, text);
+      continue;
     }
-    if (section === 'futuro') { ignorados.push({ ...origin(row), motivo: 'projecao_ou_oferta_da_fatura' }); continue; }
-    if (!dated && /^(?:SUBTOTAL\b|TOTAL (?:DO|DESTE) CARTAO\b)/u.test(norm)) {
+    // Cabeçalhos de lançamentos retomam leitura após resumo/projeção.
+    if (!dated && TRANSACTION_SECTION.test(norm)) {
+      flush(); lastExpense = null; section = 'atual'; continue;
+    }
+    if (section !== 'atual') { ignorados.push({ ...origin(row), motivo: section === 'futuro' ? 'projecao_ou_oferta_da_fatura' : 'capa_ou_resumo' }); continue; }
+    if (!dated && CARD_SUBTOTAL.test(norm)) {
       flush();
       const values = moneyTokens(text);
       if (!current || current.fechado) { issue('SUBTOTAL_SEM_BLOCO', 'Subtotal sem bloco de cartão aberto.', row); continue; }
@@ -341,20 +454,30 @@ export async function parseItauText(input, options = {}) {
       }
       current.subtotal_centavos = values[0].cents;
       current.subtotal_origem = origin(row); current.fechado = true;
-      current = null; continue;
+      current = null; lastExpense = null; continue;
     }
+    if (!dated && INVOICE_TOTAL.test(norm)) { flush(); lastExpense = null; ignorados.push({ ...origin(row), motivo: 'total_da_fatura' }); continue; }
     // Cabeçalhos/rodapés conhecidos não completam uma descrição quebrada.
     if (!dated && (REGEXES.informativo.test(norm) || /^(?:DATA\s+|DESCRICAO\b|ESTABELECIMENTO\b|VALOR EM R\$|ITAU(?:CARD)?\b)/u.test(norm))) {
       ignorados.push({ ...origin(row), motivo: 'informativo' }); continue;
     }
     if (dated) {
-      flush();
+      flush(); lastExpense = null;
       if (REGEXES.futuro.test(normalize(dated[4]))) { ignorados.push({ ...origin(row), motivo: 'projecao_ou_oferta_da_fatura' }); continue; }
       const amount = readAmount(dated[4]);
       if (amount) add(row, dated, amount);
       else if (moneyTokens(dated[4]).length) issue('VALOR_AMBIGUO', 'Mais de um valor/moeda, ou coluna BRL não identificada.', row, current || startBlock(null, row));
       else pending = { row, match: dated, block: current || startBlock(null, row) };
       continue;
+    }
+    const detail = norm.match(BANK_DETAIL);
+    if (detail && lastExpense && lastExpense.origem.pagina === row.page && lastExpense.origem.coluna === row.column && row.line <= lastExpense.origem.linha + 2) {
+      lastExpense.categoria_banco = detail[1]; lastExpense.detalhes_estabelecimento = text;
+      lastExpense.categoria_sugerida = suggestCategory(lastExpense.descricao_base.replace(/^ESTORNO\s+/iu, ''), { regras, categorias, categoriaBanco: detail[1] });
+      ignorados.push({ ...origin(row), motivo: 'categoria_e_cidade_do_estabelecimento' }); continue;
+    }
+    if (/^\d{1,3}$/u.test(norm) || /^(?:4004|3003|0800)\s+[\d -]+$/u.test(norm)) {
+      ignorados.push({ ...origin(row), motivo: 'rodape' }); continue;
     }
     // Descrição em mais de uma linha: unir só até a primeira linha com valor.
     if (pending) {
@@ -419,16 +542,20 @@ export async function parseItauText(input, options = {}) {
     block.soma_centavos = block.indices.reduce((sum, i) => sum + lancamentos[i].valor_centavos, 0);
     block.diferenca_centavos = block.subtotal_centavos === null ? null : block.soma_centavos - block.subtotal_centavos;
     const pageProblems = extractionWarnings.some(w => !w.pagina || w.pagina === block.origem.pagina || block.indices.some(i => lancamentos[i].origem.pagina === w.pagina));
-    block.status = !block.cartao_final || !block.indices.length || block.subtotal_centavos === null || block.pendencias.length || pageProblems ? 'pendente' : block.diferenca_centavos === 0 ? 'validado' : 'divergente';
+    block.status = !(block.cartao_final || block.portador) || !block.indices.length || block.subtotal_centavos === null || block.pendencias.length || pageProblems ? 'pendente' : block.diferenca_centavos === 0 ? 'validado' : 'divergente';
     block.selo = block.status === 'validado' ? 'Soma validada com a fatura' : block.status === 'divergente' ? 'Soma diferente do subtotal' : 'Soma ainda não validada';
   }
+  const totalCents = lancamentos.reduce((s, l) => s + l.valor_centavos, 0);
+  if (metadata.total_centavos !== null && totalCents !== metadata.total_centavos) pendencias.push(warning('TOTAL_FATURA_DIVERGENTE', 'A soma extraída difere do total impresso da fatura. Confira os blocos e eventuais saldos/encargos antes de importar.', { total_extraido_centavos: totalCents, total_impresso_centavos: metadata.total_centavos }));
   if (!lancamentos.length) pendencias.push(warning('SEM_LANCAMENTOS', 'Nenhum lançamento identificado. Cole o texto ou use OCR em uma etapa futura.'));
   return {
-    versao_parser: '0.1.0', origem: typeof input === 'string' ? 'texto_colado' : input.source || 'texto_extraido',
+    versao_parser: '0.2.0', origem: typeof input === 'string' ? 'texto_colado' : input.source || 'texto_extraido', metadados: metadata,
     vencimento, criterio_mes: criterioMes, exigeRevisao: true, lancamentos, ignorados, pendencias, blocos,
-    resumo: { quantidade: lancamentos.length, total_centavos: lancamentos.reduce((s, l) => s + l.valor_centavos, 0),
+    resumo: { quantidade: lancamentos.length, total_centavos: totalCents,
       pagamentos_ignorados: ignorados.filter(i => i.motivo === 'pagamento_fatura').length,
       possiveis_duplicados: lancamentos.filter(l => l.possivel_duplicado).length,
+      total_fatura_centavos: metadata.total_centavos,
+      diferenca_fatura_centavos: metadata.total_centavos === null ? null : totalCents - metadata.total_centavos,
       soma_validada: blocos.length > 0 && blocos.every(b => b.status === 'validado') && !pendencias.length },
   };
 }

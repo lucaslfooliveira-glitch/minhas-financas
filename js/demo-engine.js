@@ -4,7 +4,7 @@ const APP_ = Object.freeze({
   // Preencha com o e-mail da conta Google que será dona da planilha.
   EMAIL_PROPRIETARIO: 'PREENCHA_SEU_EMAIL@gmail.com',
   NOME_PLANILHA: 'Minhas Financas — Banco de Dados',
-  VERSAO: '1.2.0',
+  VERSAO: '1.2.1',
   SCHEMA: '2',
   FUSO: 'America/Sao_Paulo',
   PROP_PLANILHA: 'FINANCAS_SPREADSHEET_ID',
@@ -1146,7 +1146,7 @@ function impNormalizar_(value) {
 }
 function impEstabelecimento_(value) {
   return impNormalizar_(value).replace(/^(?:ESTORNO|DEVOLUCAO|REEMBOLSO)(?: DE| DA)?\s*[:*\-]?\s+/u, '')
-    .replace(/(?:^|\s)(\d{1,2})\s*\/\s*(\d{1,2})(?=\s|$)/g, function (whole, current, total) {
+    .replace(/(?<![\d/])(\d{1,2})\s*\/\s*(\d{1,2})(?=\s|$)/g, function (whole, current, total) {
       return Number(total) > 1 && Number(current) > 0 && Number(current) <= Number(total) ? ' ' : whole;
     }).replace(/\s+/g, ' ').trim();
 }
@@ -1157,7 +1157,7 @@ function impHash_(parts, env) {
   return bytes.map(function (b) { return ('0' + ((b + 256) % 256).toString(16)).slice(-2); }).join('');
 }
 function impPagamento_(description) {
-  return /\b(?:PAGAMENTO (?:EFETUADO|RECEBIDO|DE FATURA|DA FATURA)|DEBITO AUTOMATICO(?: DE| DA)? FATURA|PGTO(?: DE| DA)? FATURA|PAGTO(?: DE| DA)? FATURA)\b/u.test(impNormalizar_(description));
+  return impNormalizar_(description) === 'PAGAMENTO' || /\b(?:PAGAMENTO (?:EFETUADO|RECEBIDO|DE FATURA|DA FATURA)|DEBITO AUTOMATICO(?: DE| DA)? FATURA|PGTO(?: DE| DA)? FATURA|PAGTO(?: DE| DA)? FATURA)\b/u.test(impNormalizar_(description));
 }
 function impAssinado_(row) { return row.tipo === 'estorno' ? -row.valor_centavos : row.valor_centavos; }
 function impConta_(row) { return row.tipo === 'estorno' ? row.conta_destino_id : row.conta_origem_id; }

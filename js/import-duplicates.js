@@ -18,7 +18,7 @@ const positiveInteger = value => Number.isSafeInteger(value) && value > 0;
 function merchant(value) {
   return normalize(value)
     .replace(/^ESTORNO(?:\s+(?:DE|DA))?\s*[:*\-]?\s+/u, '')
-    .replace(/(?:^|\s)(?:PARC(?:ELA)?\.?\s*)?\(?(\d{1,2})\s*\/\s*(\d{1,2})\)?(?=\s|$)/gu, (whole, current, total) => {
+    .replace(/(?<![\d/])(?:PARC(?:ELA)?\.?\s*)?\(?(\d{1,2})\s*\/\s*(\d{1,2})\)?(?=\s|$)/gu, (whole, current, total) => {
       const n = Number(current), count = Number(total);
       return count >= 2 && n >= 1 && n <= count ? ' ' : whole;
     })

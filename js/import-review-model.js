@@ -18,7 +18,7 @@ const category = (review, id) => review.categories.find(c => c.id === id && c.at
 
 function baseDescription(description) {
   // A data já foi retirada pelo parser. Remover somente o indicador de parcela.
-  return clean(description.replace(/(?:^|\s)\d{1,2}\s*\/\s*\d{1,2}(?=\s|$)/gu, ' '));
+  return clean(description.replace(REGEXES.parcela, ' '));
 }
 function merchant(row) {
   const name = String(row.descricao_base || row.descricao || '');
@@ -129,6 +129,23 @@ export function updateReviewRow(review, id, patch) {
   review.rows[index] = row;
   review.revision++;
   return row;
+}
+
+/** Identifica um bloco inteiro sem alterar a extração original ou salvar dados. */
+export function assignBlockCard(review, blockId, final) {
+  if (!review || !Array.isArray(review.rows) || !Array.isArray(review.result?.blocos)) throw new Error('Revisão inválida.');
+  if (typeof blockId !== 'string' || !review.result.blocos.some(block => block.id === blockId)) throw new Error('Bloco de cartão não encontrado.');
+  if (typeof final !== 'string' || !/^\d{4}$/u.test(final.trim())) throw new Error('Informe os quatro dígitos finais impressos no seu cartão.');
+  const affected = review.rows.filter(row => row.bloco_id === blockId);
+  if (!affected.length) throw new Error('Este bloco não possui lançamentos para identificar.');
+  if (new Set(review.rows.map(row => row.id_temporario)).size !== review.rows.length) throw new Error('Identificadores de revisão repetidos.');
+  // updateReviewRow também invalida vínculos e confirmações de duplicidade. Só
+  // publicar o novo vetor quando todas as edições tiverem terminado com sucesso.
+  const staged = { ...review, rows: review.rows.slice() };
+  for (const row of affected) updateReviewRow(staged, row.id_temporario, { cartao_final: final.trim() });
+  review.rows = staged.rows;
+  review.revision = staged.revision;
+  return affected.length;
 }
 
 /** Troca o critério/mês sem refazer o parser nem perder correções da tabela. */

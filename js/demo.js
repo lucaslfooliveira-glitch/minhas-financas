@@ -70,7 +70,7 @@ export class DemoApiClient {
   #read(request) {
     const env = this.#env();
     switch (request.acao) {
-      case 'sistema.info': return { versao: '1.2.0-demo', schema: '2', moeda: 'BRL', fuso: 'America/Sao_Paulo', hoje: env.today, planilha_url: '', demonstracao: true };
+      case 'sistema.info': return { versao: '1.2.1-demo', schema: '2', moeda: 'BRL', fuso: 'America/Sao_Paulo', hoje: env.today, planilha_url: '', demonstracao: true };
       case 'dados.iniciais': return { configuracoes: this.#db.Configuracoes, contas: this.#db.Contas, categorias: this.#db.Categorias, recorrencias: this.#db.Recorrencias, metas: this.#db.Metas, orcamentos: this.#db.Orcamentos, hoje: env.today,
         cartoes: this.#db.Cartoes, regras_categorizacao: this.#db.Regras_Categorizacao.map(r => ({...r, categoria_nome: this.#db.Categorias.find(c => c.id === r.categoria_id)?.nome || ''})), parcelamentos: this.#db.Parcelamentos, recursos: { batchInsert: true, schema: '2' } };
       case 'registros.listar': return this.#list(request);
