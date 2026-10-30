@@ -4,7 +4,7 @@ const APP_ = Object.freeze({
   // Preencha com o e-mail da conta Google que será dona da planilha.
   EMAIL_PROPRIETARIO: 'PREENCHA_SEU_EMAIL@gmail.com',
   NOME_PLANILHA: 'Minhas Financas — Banco de Dados',
-  VERSAO: '1.2.1',
+  VERSAO: '1.3.0',
   SCHEMA: '2',
   FUSO: 'America/Sao_Paulo',
   PROP_PLANILHA: 'FINANCAS_SPREADSHEET_ID',
@@ -481,7 +481,8 @@ function domSaldoConta_(db,id,asOf) {
 
 /**
  * Relatórios puros: não escrevem dados nem usam serviços do Apps Script.
- * Todos os valores monetários são inteiros em centavos; percentuais são 0..100.
+ * Todos os valores monetários são inteiros em centavos. Percentuais de consumo
+ * podem ultrapassar 100 ou ficar negativos quando créditos superam despesas.
  * Compras de crédito reconhecem a dívida integral na aquisição. Apenas a
  * liquidação da fatura movimenta caixa. Projeções assumem quitação integral.
  */
@@ -492,9 +493,11 @@ function calcularDashboard_(db, opcoes, env) {
   var mes = relMes_(opcoes.mes || hoje.slice(0, 7));
   var data = opcoes.data ? relData_(opcoes.data, 'data') : relMinData_(relFimMes_(mes), hoje);
   if (data > hoje) erro_('DATA_INVALIDA', 'A data do relatório não pode estar no futuro.');
+  var periodoFuturo = mes > data.slice(0, 7);
   var saldos = relSaldos_(db, data);
   var categorias = relIndice_(relLinhas_(db, 'Categorias'));
   var despesas = 0, despesasFixas = 0, despesasVariaveis = 0, receitas = 0, aportes = 0, resgates = 0;
+  var receitasOrcamento = 0, movimentosOrcamento = 0;
   var resgatesOrcamento = 0, resgatesPrevistos = 0;
   var porCategoria = {};
   var porGrupo = {};
@@ -529,6 +532,13 @@ function calcularDashboard_(db, opcoes, env) {
     }
     if (l.competencia !== mes) return;
     if (confirmado && (!dataEfeito || dataEfeito > data)) return;
+    // O balanço usa a competência para AMBOS os lados. Receitas recebidas no
+    // mês (acima) permanecem no contrato de caixa dos indicadores existentes.
+    // Salário previsto, resgate, aporte e transferência não viram renda aqui.
+    if (confirmado && !periodoFuturo && (l.tipo === 'receita' || l.tipo === 'despesa' || l.tipo === 'estorno')) {
+      movimentosOrcamento++;
+      if (l.tipo === 'receita') receitasOrcamento += relNumero_(l.valor_centavos);
+    }
     // Resgate não possui categoria de consumo. Abate o grupo metas sem criar
     // uma despesa fictícia ou redistribuir arbitrariamente entre categorias.
     if (l.tipo === 'resgate') {
@@ -624,11 +634,20 @@ function calcularDashboard_(db, opcoes, env) {
       historico_disponivel: historico.contas.length > 0,
       patrimonio_liquido_centavos: historico.contas.length ? historico.patrimonio_liquido_centavos : null });
   }
+  // Parcelas já contratadas podem pertencer a um mês futuro. Permanecem nos
+  // relatórios de compromissos legados, sem aparecer como resultado realizado
+  // antes de o mês começar.
+  var despesasBalanco = periodoFuturo ? 0 : despesas;
   return { mes: mes, data_referencia: data, saldos: saldos,
     indicadores: { receitas_recebidas_centavos: receitas, despesas_orcamentarias_centavos: despesas,
       despesas_fixas_orcamentarias_centavos: despesasFixas, despesas_variaveis_orcamentarias_centavos: despesasVariaveis,
       aportes_centavos: aportes, resgates_centavos: resgates, poupanca_liquida_centavos: aportes - resgates,
       taxa_poupanca_percentual: receitas > 0 ? (aportes - resgates) * 100 / receitas : null },
+    balanco_mensal: { receitas_centavos: receitasOrcamento, despesas_liquidas_centavos: despesasBalanco,
+      resultado_centavos: receitasOrcamento - despesasBalanco,
+      percentual_renda_consumida: receitasOrcamento > 0 ? despesasBalanco * 100 / receitasOrcamento : null,
+      receita_registrada: receitasOrcamento > 0, tem_movimentacao: movimentosOrcamento > 0,
+      periodo_futuro: periodoFuturo, criterio: 'competencia', data_referencia: data },
     fluxo_caixa: fluxo,
     orcamento: { renda_planejada_centavos: planejamento.renda_planejada_centavos,
       planejamento_cadastrado: planejamento.planejamento_cadastrado },
