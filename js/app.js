@@ -1,3 +1,4 @@
+import { renderIncomeHistory, renderBudgetComparison, renderPendingAgenda, historyPoints, historyChartData } from './dashboard-insights.js';
 import { GoogleApiClient, loadConnectionConfig, saveConnectionConfig, clearConnectionConfig } from './api.js';
 import { DemoApiClient } from './demo.js';
 import { setupPwa } from './pwa.js';
@@ -7,7 +8,7 @@ import { renderMonthlyBalance } from './monthly-balance.js';
 import { money, percent, today, monthNow, shiftMonth, dateLabel, monthLabel, parseMoney, escapeHtml as esc, uuid, buildTransaction, buildSnapshotRequest } from './utils.js';
 
 const $ = selector => document.querySelector(selector);
-const state = { view: 'dashboard', mode: 'disconnected', month: monthNow(), initials: null, dashboard: null, transactions: [], invoices: null, projection: null, private: false, busy: false, pending: null, offset: 0, nextOffset: null, updated: null, error: '', filter: '', cardFilter: '' };
+const state = { view: 'dashboard', mode: 'disconnected', month: monthNow(), initials: null, dashboard: null, transactions: [], invoices: null, projection: null, private: false, busy: false, pending: null, offset: 0, nextOffset: null, updated: null, error: '', filter: '', cardFilter: '', historyMonths: 6, pendingDirection: 'todos', pendingWindow: 'todos', pendingLimit: 10 };
 let client = null, googleClient = null, charts = [], modalHandler = null, modalDirty = false, modalBusy = false, pwa;
 let authConnecting = false, authGeneration = 0;
 const types = { receita: 'Entrada', despesa: 'Saída', aporte: 'Investimento', resgate: 'Resgate', transferencia: 'Transferência', ajuste: 'Ajuste', estorno: 'Estorno' };
@@ -96,6 +97,7 @@ function renderDashboard() {
     ${!state.initials.contas.length ? notice('Comece cadastrando sua conta principal e o saldo de fechamento de ontem. Depois, defina a renda planejada do mês.') + '<button class="button primary" data-action="account">Cadastrar primeira conta</button>' : ''}
     ${renderMonthlyBalance(d.balanco_mensal, { month: state.month, private: state.private })}${renderMonthForecast(d.fechamento_previsto, { private: state.private })}
     <div class="kpi-grid">${kpi('Saldo disponível', M(s.disponivel_centavos), 'Contas do dia a dia', 'primary')}${kpi('Entradas recebidas', M(i.receitas_recebidas_centavos), 'Receita líquida no mês')}${kpi('Poupança direcionada', P(i.taxa_poupanca_percentual), `${M(i.poupanca_liquida_centavos)} em aportes líquidos`)}${kpi('Patrimônio líquido', M(s.patrimonio_liquido_centavos), `${M(s.dividas_totais_centavos ?? s.dividas_centavos)} em dívidas`)}</div>
+    ${renderIncomeHistory(d.analises?.historico, { months: state.historyMonths, private: state.private })}${renderBudgetComparison(d.categorias, { private: state.private, future: state.month > monthNow() })}${renderPendingAgenda(d.analises?.pendencias, { private: state.private, direction: state.pendingDirection, window: state.pendingWindow, limit: state.pendingLimit })}
     ${alerts.length ? notice(`${alerts.length} categoria(s) com limite ultrapassado ou em risco. Consulte os limites em Planejamento.`) : ''}
     <div class="dashboard-grid"><section class="panel"><div class="panel-heading"><div><span class="eyebrow">DISTRIBUIÇÃO</span><h3>Para onde foi o dinheiro</h3></div><span class="badge neutral">${M(i.despesas_orcamentarias_centavos)}</span></div>${spent.length ? '<div class="chart-box"><canvas id="spending-chart" role="img" aria-label="Distribuição das despesas por categoria"></canvas></div>' : empty('Seu mapa de gastos começa aqui', 'As despesas confirmadas aparecem por categoria.')}<div class="legend-list">${spent.map((c, n) => `<button class="legend-row" data-action="category-filter" data-id="${esc(c.categoria_id)}"><span><i class="legend-dot tone-${n % 6}"></i>${esc(c.nome)}</span><strong>${M(c.realizado_centavos)}</strong></button>`).join('')}</div></section>
     <section class="panel"><div class="panel-heading"><div><span class="eyebrow">SEU ORÇAMENTO</span><h3>Equilíbrio do mês</h3></div>${actionButton('Ajustar →', 'budget')}</div><p class="muted">Renda planejada: <strong>${M(d.orcamento.renda_planejada_centavos)}</strong></p><div class="stack">${d.grupos.map(g => { const ratio = g.limite_centavos > 0 ? Math.min(100, Math.max(0, g.realizado_centavos / g.limite_centavos * 100)) : 0; return `<div><div class="legend-row"><span>${groups[g.grupo]}</span><span>${g.percentual === null ? 'Valor fixo' : P(g.percentual)}</span></div><div class="progress-track"><span class="progress-fill ${g.alerta === 'ultrapassado' ? 'over' : ''}" style="width:${ratio}%"></span></div><div class="legend-row muted"><span>${M(g.realizado_centavos)} realizados</span><span>de ${M(g.limite_centavos)}</span></div></div>`; }).join('')}</div><p class="field-note">Necessidades e desejos são limites de consumo. Metas representam o dinheiro destinado a guardar, descontados os resgates.</p></section></div>
@@ -348,12 +350,33 @@ function createChart(id, type, data, options = {}) {
 function axisOptions() { return { x: { grid: { display: false }, ticks: { color: '#5f7065', font: { size: 10 } }, border: { display: false } }, y: { grid: { color: '#eef1e9' }, border: { display: false }, ticks: { color: '#5f7065', font: { size: 10 }, callback: v => Math.abs(v) >= 1000 ? (v / 1000).toLocaleString('pt-BR') + ' mil' : v.toLocaleString('pt-BR') } } }; }
 function drawDashboardCharts() {
   const d = state.dashboard;
+  drawIncomeHistory();
   const categories = d.categorias.filter(c => c.tipo_movimentacao === 'despesa' && c.realizado_centavos > 0);
   createChart('spending-chart', 'doughnut', { labels: categories.map(c => c.nome), datasets: [{ data: categories.map(c => c.realizado_centavos / 100), backgroundColor: palette, borderColor: '#fff', borderWidth: 5, borderRadius: 4, hoverOffset: 5 }] }, { cutout: '76%', onClick: (_, items) => { if (items.length) { state.filter = categories[items[0].index].categoria_id; void setView('transactions'); } } });
   createChart('wealth-chart', 'line', { labels: d.evolucao_patrimonial.map(e => new Intl.DateTimeFormat('pt-BR', { month: 'short', timeZone: 'UTC' }).format(new Date(e.mes + '-01T12:00:00Z'))), datasets: [{ label: 'Patrimônio líquido', data: d.evolucao_patrimonial.map(e => e.patrimonio_liquido_centavos === null ? null : e.patrimonio_liquido_centavos / 100), borderColor: '#2f8264', backgroundColor: '#2f82640c', pointRadius: 3, pointHoverRadius: 5, fill: true, tension: 0.25, spanGaps: false, borderWidth: 2.5 }] }, { scales: axisOptions() });
 }
 function drawProjection() { createChart('projection-chart', 'bar', { labels: state.projection.meses.map(m => new Intl.DateTimeFormat('pt-BR', { month: 'short', timeZone: 'UTC' }).format(new Date(m.mes + '-01T12:00:00Z'))), datasets: [{ label: 'Entradas estimadas', data: state.projection.meses.map(m => m.entradas_previstas_centavos / 100), backgroundColor: '#4b9376', borderRadius: 5 }, { label: 'Saídas previstas', data: state.projection.meses.map(m => m.saidas_previstas_centavos / 100), backgroundColor: '#dba18b', borderRadius: 5 }] }, { scales: axisOptions(), plugins: { legend: { display: true, labels: { usePointStyle: true, pointStyle: 'circle', boxWidth: 6, color: '#657967', font: { size: 11 } } } } }); }
 
+
+async function openHistoryMonth(month) {
+  if (state.busy || authConnecting || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return;
+  state.month=month; state.view='transactions'; state.filter=''; state.transactions=[]; state.dashboard=null; state.nextOffset=null;
+  render(); await loadData(); $('#main-content').focus({preventScroll:true}); window.scrollTo({top:0,behavior:'instant'});
+}
+function forecastHatch(color) {
+  const tile=document.createElement('canvas'); tile.width=tile.height=8;
+  const ctx=tile.getContext('2d'); if(!ctx) return color+'35';
+  ctx.fillStyle=color+'20'; ctx.fillRect(0,0,8,8); ctx.strokeStyle=color; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(-2,2); ctx.lineTo(2,-2); ctx.moveTo(0,8);ctx.lineTo(8,0);ctx.moveTo(6,10);ctx.lineTo(10,6);ctx.stroke();
+  return ctx.createPattern(tile,'repeat') || color+'35';
+}
+function drawIncomeHistory() {
+  if(!state.dashboard?.analises?.historico || state.private) return;
+  const points=historyPoints(state.dashboard.analises.historico,state.historyMonths), data=historyChartData(points);
+  data.datasets.forEach(d=>{if(d.forecast) d.backgroundColor=forecastHatch(d.color);});
+  const scales=axisOptions(); scales.x.stacked=true; scales.y.stacked=true;
+  createChart('income-history-chart','bar',data,{scales,plugins:{legend:{display:true,labels:{usePointStyle:true,font:{size:10}}}},onClick:(_,items)=>{if(items.length) void openHistoryMonth(points[items[0].index].mes);}});
+}
 async function handleAction(action, id) {
   if (action === 'demo') return enterDemo();
   if (action === 'setup') return setView('settings');
@@ -369,6 +392,8 @@ async function handleAction(action, id) {
   if (!client || !state.initials) { toast('Conecte sua conta ou abra a demonstração primeiro.'); return; }
   if (action === 'retry') { if (state.pending) return runMutation(state.pending.request); return; }
   if (state.busy || authConnecting) return;
+  if (action === 'history-month') return openHistoryMonth(id);
+  if (action === 'more-pending') { state.pendingLimit += 10; render(); return; }
   if (action === 'category-filter') { state.filter = id; return setView('transactions'); }
   if (action === 'transaction') return openTransaction();
   if (action === 'account') return openAccount(id);
@@ -408,6 +433,9 @@ $('#privacy-button').addEventListener('click', () => { state.private = !state.pr
 $('#install-button').addEventListener('click', () => void pwa.install());
 $('#month-select').addEventListener('change', () => { if (state.busy) { $('#month-select').value = state.month; return; } const value = $('#month-select').value; if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(value)) return; state.month = value; state.dashboard = null; state.transactions = []; state.invoices = null; state.projection = null; render(); void loadData(); });
 document.addEventListener('change', event => {
+  if (event.target.id === 'income-history-range') { state.historyMonths = Number(event.target.value) === 12 ? 12 : 6; render(); }
+  if (event.target.id === 'pending-direction') { state.pendingDirection = event.target.value; state.pendingLimit=10; render(); }
+  if (event.target.id === 'pending-window') { state.pendingWindow = event.target.value; state.pendingLimit=10; render(); }
   if (event.target.id === 'dashboard-card-filter') { state.cardFilter = event.target.value; render(); }
   if (event.target.id === 'transaction-filter') { state.filter = event.target.value; render(); }
   if (!event.target.closest('#modal-form')) return;

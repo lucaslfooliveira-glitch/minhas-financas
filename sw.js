@@ -1,10 +1,10 @@
 /* Cache exclusivo da interface. Nenhum dado financeiro ou token é armazenado. */
 const CACHE_PREFIX = 'minhas-financas-shell:' + new URL('./', self.location.href).pathname + ':';
-const CACHE = CACHE_PREFIX + 'v1.4.0-balanco-mensal';
+const CACHE = CACHE_PREFIX + 'v1.5.0-balanco-mensal';
 const SHELL = [
   './', './index.html', './config.js', './manifest.webmanifest',
   './css/tailwind.css', './css/styles.css', './css/integration.css', './css/import.css',
-  './js/app.js', './js/utils.js', './js/api.js', './js/pwa.js', './js/demo.js', './js/demo-engine.js', './js/monthly-balance.js', './js/month-forecast.js',
+  './js/app.js', './js/utils.js', './js/api.js', './js/pwa.js', './js/demo.js', './js/demo-engine.js', './js/monthly-balance.js', './js/month-forecast.js', './js/dashboard-insights.js',
   './js/import-review.js', './js/import-review-model.js', './js/import-duplicates.js', './js/itauPdfParser.js',
   './js/import-batch.js', './js/sha256.js',
   './vendor/chart.umd.min.js',

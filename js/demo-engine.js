@@ -4,7 +4,7 @@ const APP_ = Object.freeze({
   // Preencha com o e-mail da conta Google que será dona da planilha.
   EMAIL_PROPRIETARIO: 'PREENCHA_SEU_EMAIL@gmail.com',
   NOME_PLANILHA: 'Minhas Financas — Banco de Dados',
-  VERSAO: '1.4.0',
+  VERSAO: '1.5.0',
   SCHEMA: '2',
   FUSO: 'America/Sao_Paulo',
   PROP_PLANILHA: 'FINANCAS_SPREADSHEET_ID',
@@ -649,6 +649,7 @@ function calcularDashboard_(db, opcoes, env) {
       receita_registrada: receitasOrcamento > 0, tem_movimentacao: movimentosOrcamento > 0,
       periodo_futuro: periodoFuturo, criterio: 'competencia', data_referencia: data },
     fechamento_previsto: relFechamento_(db, mes, data, fluxo, env),
+    analises: relAnalisesDashboard_(db, mes, data, env),
     fluxo_caixa: fluxo,
     orcamento: { renda_planejada_centavos: planejamento.renda_planejada_centavos,
       planejamento_cadastrado: planejamento.planejamento_cadastrado },
@@ -1169,6 +1170,49 @@ function relFechamento_(db, mes, data, fluxo, env) {
     fechamento:{entradas_centavos:e+p.entradas_previstas_centavos,saidas_centavos:s+p.saidas_previstas_centavos,
       resultado_centavos:e-s+p.entradas_previstas_centavos-p.saidas_previstas_centavos,saldo_disponivel_centavos:p.saldo_final_centavos},
     compromissos:p.compromissos,avisos:proj.avisos,importacao_aviso:relAvisoImportacao_(db,data)};
+}
+/** Histórico do orçamento e agenda de caixa: bases explicitamente distintas. Sem escrita. */
+function relAnalisesDashboard_(db, mes, corte, env) {
+  var hoje = relData_(env.today, 'today'), atual = hoje.slice(0,7);
+  var contas = relIndice_(relLinhas_(db, 'Contas'));
+  var fimVirtual = relMinData_(mes, relSomarMes_(atual,23));
+  var virtuais = fimVirtual >= atual ? relRecorrenciasVirtuais_(db, atual, fimVirtual, env) : [];
+  var lancamentos = relLinhas_(db,'Lancamentos').concat(virtuais);
+  var historico = [];
+  for (var i=-11;i<=0;i++) {
+    var m=relSomarMes_(mes,i); if(m<'1900-01') continue;
+    var referencia=relMinData_(relFimMes_(m),corte);
+    var ponto={mes:m,data_referencia:referencia,periodo_futuro:m>atual,tem_registros:false,
+      receitas_centavos:0,despesas_centavos:0,receitas_previstas_centavos:0,despesas_previstas_centavos:0};
+    lancamentos.forEach(function(l){
+      if(l.status==='cancelado'||l.competencia!==m||['receita','despesa','estorno'].indexOf(l.tipo)<0) return;
+      var efeito=relDataEfeito_(l,contas);
+      var realizado=l.status==='confirmado' && m<=atual && efeito && efeito<=referencia;
+      var previsto=l.status==='previsto' || (l.status==='confirmado' && efeito && (m>atual||efeito>referencia));
+      if(!realizado&&!previsto) return;
+      if(corte<hoje && l.status==='confirmado' && efeito>referencia) return;
+      // Não reconstituir um fechamento passado usando recebimentos posteriores.
+      if(m<atual && l.status==='confirmado' && !realizado) return;
+      ponto.tem_registros=true;
+      var campo=l.tipo==='receita'?'receitas':'despesas';
+      var valor=relNumero_(l.valor_centavos)*(l.tipo==='estorno'?-1:1);
+      ponto[campo+(realizado?'_centavos':'_previstas_centavos')]+=valor;
+    });
+    ponto.resultado_centavos=ponto.receitas_centavos-ponto.despesas_centavos;
+    historico.push(ponto);
+  }
+  var proj=calcularProjecao_(db,{mes:atual,qtd_meses:4},env);
+  var limite=new Date(hoje+'T12:00:00Z'); limite.setUTCDate(limite.getUTCDate()+90);
+  var ate=limite.toISOString().slice(0,10), itens=[];
+  proj.meses.forEach(function(m){m.compromissos.forEach(function(c){
+    if(c.data_vencimento>ate) return;
+    var delta=Math.round((Date.parse(c.data_vencimento+'T12:00:00Z')-Date.parse(hoje+'T12:00:00Z'))/86400000);
+    itens.push(Object.assign({},c,{dias_ate_vencimento:delta,direcao:c.efeito_caixa_centavos>0?'receber':'pagar'}));
+  });});
+  itens.sort(function(a,b){return a.data_vencimento.localeCompare(b.data_vencimento)||a.id.localeCompare(b.id);});
+  return {historico:historico,criterio_historico:'competencia',
+    pendencias:{data_referencia:hoje,ate:ate,criterio:'caixa',itens:itens,avisos:proj.avisos,
+      importacao_aviso:relAvisoImportacao_(db,hoje)}};
 }
 
 
