@@ -2,6 +2,7 @@ import { GoogleApiClient, loadConnectionConfig, saveConnectionConfig, clearConne
 import { DemoApiClient } from './demo.js';
 import { setupPwa } from './pwa.js';
 import { createImportReview } from './import-review.js';
+import { renderMonthForecast } from './month-forecast.js';
 import { renderMonthlyBalance } from './monthly-balance.js';
 import { money, percent, today, monthNow, shiftMonth, dateLabel, monthLabel, parseMoney, escapeHtml as esc, uuid, buildTransaction, buildSnapshotRequest } from './utils.js';
 
@@ -93,7 +94,7 @@ function renderDashboard() {
   const alerts = d.categorias.filter(c => ['ultrapassado', 'risco'].includes(c.alerta));
   return `<div class="page-stack"><div class="section-heading"><div><span class="eyebrow">${esc(monthLabel(state.month))}</span><h2>Seu mês em perspectiva</h2></div><span class="badge neutral">${state.mode === 'demo' ? 'Dados fictícios' : 'Referência: ' + dateLabel(d.data_referencia)}</span></div>
     ${!state.initials.contas.length ? notice('Comece cadastrando sua conta principal e o saldo de fechamento de ontem. Depois, defina a renda planejada do mês.') + '<button class="button primary" data-action="account">Cadastrar primeira conta</button>' : ''}
-    ${renderMonthlyBalance(d.balanco_mensal, { month: state.month, private: state.private })}
+    ${renderMonthlyBalance(d.balanco_mensal, { month: state.month, private: state.private })}${renderMonthForecast(d.fechamento_previsto, { private: state.private })}
     <div class="kpi-grid">${kpi('Saldo disponível', M(s.disponivel_centavos), 'Contas do dia a dia', 'primary')}${kpi('Entradas recebidas', M(i.receitas_recebidas_centavos), 'Receita líquida no mês')}${kpi('Poupança direcionada', P(i.taxa_poupanca_percentual), `${M(i.poupanca_liquida_centavos)} em aportes líquidos`)}${kpi('Patrimônio líquido', M(s.patrimonio_liquido_centavos), `${M(s.dividas_totais_centavos ?? s.dividas_centavos)} em dívidas`)}</div>
     ${alerts.length ? notice(`${alerts.length} categoria(s) com limite ultrapassado ou em risco. Consulte os limites em Planejamento.`) : ''}
     <div class="dashboard-grid"><section class="panel"><div class="panel-heading"><div><span class="eyebrow">DISTRIBUIÇÃO</span><h3>Para onde foi o dinheiro</h3></div><span class="badge neutral">${M(i.despesas_orcamentarias_centavos)}</span></div>${spent.length ? '<div class="chart-box"><canvas id="spending-chart" role="img" aria-label="Distribuição das despesas por categoria"></canvas></div>' : empty('Seu mapa de gastos começa aqui', 'As despesas confirmadas aparecem por categoria.')}<div class="legend-list">${spent.map((c, n) => `<button class="legend-row" data-action="category-filter" data-id="${esc(c.categoria_id)}"><span><i class="legend-dot tone-${n % 6}"></i>${esc(c.nome)}</span><strong>${M(c.realizado_centavos)}</strong></button>`).join('')}</div></section>

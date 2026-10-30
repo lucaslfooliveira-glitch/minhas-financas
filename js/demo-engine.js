@@ -4,7 +4,7 @@ const APP_ = Object.freeze({
   // Preencha com o e-mail da conta Google que será dona da planilha.
   EMAIL_PROPRIETARIO: 'PREENCHA_SEU_EMAIL@gmail.com',
   NOME_PLANILHA: 'Minhas Financas — Banco de Dados',
-  VERSAO: '1.3.0',
+  VERSAO: '1.4.0',
   SCHEMA: '2',
   FUSO: 'America/Sao_Paulo',
   PROP_PLANILHA: 'FINANCAS_SPREADSHEET_ID',
@@ -648,6 +648,7 @@ function calcularDashboard_(db, opcoes, env) {
       percentual_renda_consumida: receitasOrcamento > 0 ? despesasBalanco * 100 / receitasOrcamento : null,
       receita_registrada: receitasOrcamento > 0, tem_movimentacao: movimentosOrcamento > 0,
       periodo_futuro: periodoFuturo, criterio: 'competencia', data_referencia: data },
+    fechamento_previsto: relFechamento_(db, mes, data, fluxo, env),
     fluxo_caixa: fluxo,
     orcamento: { renda_planejada_centavos: planejamento.renda_planejada_centavos,
       planejamento_cadastrado: planejamento.planejamento_cadastrado },
@@ -1152,6 +1153,22 @@ function relHaRecorrenciasAntigasNaoProjetadas_(db, mesAtual) {
     }
     return false;
   });
+}
+
+/** Fechamento de caixa separado do orçamento; faturas e recorrências deduplicadas pela projeção existente. */
+function relFechamento_(db, mes, data, fluxo, env) {
+  var atual=env.today.slice(0,7);
+  if(mes<atual || data!==env.today) return {disponivel:false,motivo:'historico'};
+  var n=(Number(mes.slice(0,4))-Number(atual.slice(0,4)))*12+Number(mes.slice(5,7))-Number(atual.slice(5,7));
+  if(n>23) return {disponivel:false,motivo:'horizonte'};
+  var proj=calcularProjecao_(db,{mes:atual,qtd_meses:n+1},env), p=proj.meses[n];
+  var e=mes===atual?fluxo.entradas_centavos:0, s=mes===atual?fluxo.saidas_centavos:0;
+  return {disponivel:true,criterio:'caixa',mes:mes,data_referencia:data,
+    realizado:{entradas_centavos:e,saidas_centavos:s,resultado_centavos:e-s},
+    pendente:{entradas_centavos:p.entradas_previstas_centavos,saidas_centavos:p.saidas_previstas_centavos},
+    fechamento:{entradas_centavos:e+p.entradas_previstas_centavos,saidas_centavos:s+p.saidas_previstas_centavos,
+      resultado_centavos:e-s+p.entradas_previstas_centavos-p.saidas_previstas_centavos,saldo_disponivel_centavos:p.saldo_final_centavos},
+    compromissos:p.compromissos,avisos:proj.avisos,importacao_aviso:relAvisoImportacao_(db,data)};
 }
 
 
