@@ -4,13 +4,14 @@ import { DemoApiClient } from './demo.js';
 import { setupPwa } from './pwa.js';
 import { createImportReview } from './import-review.js';
 import { renderInvoiceReconciliation } from './invoice-reconciliation.js';
+import { loadDebtRecognition, buildDebtRecognitionRequest } from './card-debt-recognition.js';
 import { renderMonthForecast } from './month-forecast.js';
 import { renderMonthlyBalance } from './monthly-balance.js';
 import { money, percent, today, monthNow, shiftMonth, dateLabel, monthLabel, parseMoney, escapeHtml as esc, uuid, buildTransaction, buildSnapshotRequest } from './utils.js';
 
 const $ = selector => document.querySelector(selector);
 const state = { view: 'dashboard', mode: 'disconnected', month: monthNow(), initials: null, dashboard: null, transactions: [], invoices: null, projection: null, private: false, busy: false, pending: null, offset: 0, nextOffset: null, updated: null, error: '', filter: '', transactionAccount: '', cardFilter: '', historyMonths: 6, pendingDirection: 'todos', pendingWindow: 'todos', pendingLimit: 10 };
-let client = null, googleClient = null, charts = [], modalHandler = null, modalDirty = false, modalBusy = false, pwa;
+let client = null, googleClient = null, charts = [], modalHandler = null, modalDirty = false, modalBusy = false, modalSuccessMessage = 'Registro salvo', pwa;
 let authConnecting = false, authGeneration = 0;
 const types = { receita: 'Entrada', despesa: 'Saída', aporte: 'Investimento', resgate: 'Resgate', transferencia: 'Transferência', ajuste: 'Ajuste', estorno: 'Estorno' };
 const accountTypes = { corrente: 'Conta corrente', carteira: 'Dinheiro', reserva: 'Reserva', investimento: 'Investimento', cartao: 'Cartão de crédito', divida: 'Dívida' };
@@ -136,7 +137,7 @@ function renderPlanning() {
   return `<div class="page-stack"><div class="section-heading"><div><span class="eyebrow">PRÓXIMOS PASSOS</span><h2>Planeje com espaço para viver</h2></div><button class="button primary" data-action="budget">Definir orçamento</button></div>
     <section class="panel"><div class="panel-heading"><h3>Gasto e limite por categoria</h3><button class="button secondary small" data-action="category">+ Categoria</button></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Categoria</th><th>Realizado</th><th>Previsto</th><th>Limite</th><th>Situação</th><th><span class="sr-only">Ação</span></th></tr></thead><tbody>${d.categorias.map(c => `<tr><td>${esc(c.nome)}</td><td>${M(c.realizado_centavos)}</td><td>${M(c.previsto_centavos)}</td><td>${M(c.limite_centavos)}</td><td><span class="badge ${c.alerta === 'ultrapassado' ? 'negative' : c.alerta === 'risco' ? 'warning' : 'neutral'}">${({ dentro: 'Dentro do plano', risco: 'Em risco', ultrapassado: 'Ultrapassado', sem_orcamento: 'Sem limite' })[c.alerta]}</span></td><td>${actionButton('Definir limite', 'category-budget', c.categoria_id)}</td></tr>`).join('')}</tbody></table></div></section>
     <section class="panel"><div class="panel-heading"><div><span class="eyebrow">COMPROMETIMENTO FUTURO</span><h3>O que vem pela frente</h3></div><span class="badge neutral">Próximos 6 meses</span></div>${state.projection ? '<div class="chart-box short"><canvas id="projection-chart" role="img" aria-label="Entradas e saídas previstas dos próximos seis meses"></canvas></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Mês</th><th>Entradas estimadas</th><th>Saídas previstas</th><th>Saldo projetado</th></tr></thead><tbody>' + state.projection.meses.map(m => `<tr><td>${esc(monthLabel(m.mes))}</td><td>${M(m.entradas_previstas_centavos)}</td><td>${M(m.saidas_previstas_centavos)}</td><td class="${m.saldo_negativo ? 'negative' : ''}">${M(m.saldo_final_centavos)}</td></tr>`).join('') + '</tbody></table></div>' : '<p class="muted">A projeção será carregada junto com o planejamento.</p>'}<p class="field-note">Inclui apenas compromissos cadastrados, com quitação integral das faturas. Receitas previstas são estimativas. Dívidas iniciais sem vencimento e créditos de cartão precisam de conferência.</p>${state.projection?.avisos?.includes('RECORRENCIAS_ANTIGAS_NAO_PROJETADAS') ? notice('Há ocorrências antigas de recorrências ainda não geradas. Gere o período anterior para conferir o que foi pago ou cancelar o que não se aplica.') : ''}</section>
-    <section class="panel invoice-section" id="conferencia-faturas" tabindex="-1" aria-labelledby="invoice-section-title"><div class="panel-heading"><div><span class="eyebrow">CARTÕES DE CRÉDITO</span><h3 id="invoice-section-title">Faturas e saldo do cartão</h3></div></div>${!state.invoices ? '<p role="status">As faturas ainda não foram carregadas. Use Atualizar para tentar novamente.</p>' : renderInvoiceReconciliation(state.invoices, state.initials.contas, { private: state.private })}${state.invoices && invoices.length ? `<div class="account-grid">${invoices.map(f => `<article class="account-card"><div class="legend-row"><strong>${esc(f.nome_cartao)}</strong><span class="badge ${f.exige_conciliacao ? 'warning' : f.atrasada ? 'negative' : 'neutral'}">${f.exige_conciliacao ? 'Precisa de conferência' : f.atrasada ? 'Vencida' : 'Em aberto'}</span></div><p>Vence em ${dateLabel(f.data_vencimento)}</p><strong class="kpi-value">${M(f.restante_centavos)}</strong><p class="field-note">${M(f.pago_centavos)} pagos · ${M(f.previsto_credito_centavos)} em previsões</p>${f.restante_centavos > 0 ? `<button class="button secondary small" data-action="pay-invoice" data-id="${esc(f.fatura_ref)}">Registrar pagamento</button>` : ''}</article>`).join('')}</div>` : state.invoices ? empty('Sem faturas pendentes', 'Compras com cartão e parcelas aparecerão aqui.') : ''}${state.invoices?.dividas_iniciais_sem_vencimento?.length ? notice('Existe dívida inicial sem vencimento definido. Ela compõe o patrimônio, mas fica fora das saídas datadas da projeção. Registre a amortização em um lançamento de transferência.') : ''}</section>
+    <section class="panel invoice-section" id="conferencia-faturas" tabindex="-1" aria-labelledby="invoice-section-title"><div class="panel-heading"><div><span class="eyebrow">CARTÕES DE CRÉDITO</span><h3 id="invoice-section-title">Faturas e saldo do cartão</h3></div></div>${!state.invoices ? '<p role="status">As faturas ainda não foram carregadas. Use Atualizar para tentar novamente.</p>' : renderInvoiceReconciliation(state.invoices, state.initials.contas, { private: state.private })}${state.invoices && invoices.length ? `<div class="account-grid">${invoices.map(f => `<article class="account-card"><div class="legend-row"><strong>${esc(f.nome_cartao)}</strong><span class="badge ${f.exige_conciliacao ? 'warning' : f.atrasada ? 'negative' : 'neutral'}">${f.exige_conciliacao ? 'Precisa de conferência' : f.atrasada ? 'Vencida' : 'Em aberto'}</span></div><p>Vence em ${dateLabel(f.data_vencimento)}</p><strong class="kpi-value">${M(f.restante_centavos)}</strong><p class="field-note">${M(f.pago_centavos)} pagos · ${M(f.previsto_credito_centavos)} em previsões</p>${f.restante_centavos > 0 ? `<button class="button secondary small" data-action="pay-invoice" data-id="${esc(f.fatura_ref)}">${f.exige_conciliacao ? 'Resolver saldo para pagar' : 'Registrar pagamento'}</button>` : ''}</article>`).join('')}</div>` : state.invoices ? empty('Sem faturas pendentes', 'Compras com cartão e parcelas aparecerão aqui.') : ''}${state.invoices?.dividas_iniciais_sem_vencimento?.length ? notice('Existe dívida inicial sem vencimento definido. Ela compõe o patrimônio, mas fica fora das saídas datadas da projeção. Registre a amortização em um lançamento de transferência.') : ''}</section>
     <div class="dashboard-grid"><section class="panel"><div class="panel-heading"><h3>Recorrências mensais</h3><button class="button secondary small" data-action="recurrence">+ Recorrência</button></div>${state.initials.recorrencias.length ? state.initials.recorrencias.map(r => `<div class="legend-row"><div><strong>${esc(r.descricao)}</strong><p class="field-note">Dia ${r.dia_vencimento} · ${M(r.valor_previsto_centavos)} · ${r.ativa ? 'Ativa' : 'Pausada'}</p></div>${actionButton(r.ativa ? 'Pausar' : 'Ativar', 'toggle-recurrence', r.id)}</div>`).join('') + '<button class="button secondary" data-action="generate">Gerar previsões</button>' : empty('Menos tarefas repetidas', 'Cadastre aluguel, salário ou assinaturas e confirme os valores quando acontecerem.')}</section><section class="panel"><div class="panel-heading"><h3>Suas metas</h3><button class="button secondary small" data-action="goal">+ Meta</button></div>${d.metas.length ? d.metas.map(m => `<article class="goal-item"><div class="legend-row"><strong>${esc(m.nome)}</strong><span>${P(m.progresso_percentual)}</span></div><div class="progress-track"><span class="progress-fill" style="width:${Math.min(100, Math.max(0, m.progresso_percentual || 0))}%"></span></div><p class="field-note">${M(m.valor_alocado_centavos)} de ${M(m.valor_alvo_centavos)}${m.data_alvo ? ' · até ' + dateLabel(m.data_alvo) : ''}</p>${actionButton('Ajustar reserva da meta', 'goal', m.meta_id)}${m.alocacao_conta_excedida ? notice('As metas desta conta superam o saldo atual.') : ''}</article>`).join('') : empty('Comece pelo que importa', 'Uma reserva de emergência ou um objetivo com valor e prazo.')}</section></div></div>`;
 }
 function renderAccounts() {
@@ -214,10 +215,12 @@ function disconnect() {
 
 function field(name, label, type = 'text', value = '', extra = '') { return `<label class="field">${label}<input name="${name}" type="${type}" value="${esc(value)}" ${extra}></label>`; }
 function select(name, label, opts, extra = '') { return `<label class="field">${label}<select name="${name}" ${extra}>${opts}</select></label>`; }
-function showModal(title, body, handler, submit = 'Salvar') {
+function showModal(title, body, handler, submit = 'Salvar', successMessage = 'Registro salvo') {
   if (pendingGuard()) return;
   $('#modal-title').textContent = title; $('#modal-body').innerHTML = body + '<p id="modal-error" class="field-error" role="alert"></p>';
-  $('#modal-submit').textContent = submit; $('#modal-submit').disabled = false; $('#modal-cancel').disabled = false; $('#modal-close').disabled = false;
+  $('#modal-submit').textContent = submit; $('#modal-submit').disabled = false; $('#modal-submit').hidden = false; $('#modal-cancel').disabled = false; $('#modal-close').disabled = false;
+  modalSuccessMessage = successMessage;
+  $('#modal-form').dataset.invoiceAccount = '';
   $('#modal-form').setAttribute('autocomplete', 'off'); modalHandler = handler; modalDirty = false;
   $('#modal-form').dataset.kind = '';
   $('#modal').showModal();
@@ -232,6 +235,9 @@ function showFormError(error) {
   const box = $('#modal-error');
   if (box) {
     box.textContent = error.message || 'Não foi possível concluir esta operação.';
+    if (error.code === 'PAGAMENTO_EXCESSIVO' && $('#modal-form').dataset.invoiceAccount) {
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'button secondary small'; button.dataset.action = 'recognize-card-debt'; button.dataset.id = $('#modal-form').dataset.invoiceAccount; button.textContent = 'Conferir e reconhecer dívida importada'; box.append(document.createElement('br'), button);
+    }
     if (error.code === 'AUTH_EXPIRED' && state.mode === 'real') {
       const button = document.createElement('button'); button.type = 'button'; button.className = 'button secondary small'; button.dataset.action = 'connect'; button.textContent = 'Reconectar Google sem fechar o formulário'; box.append(document.createElement('br'), button);
     }
@@ -329,9 +335,29 @@ function openSnapshot(id) {
   const a = account(id);
   showModal('Atualizar avaliação', `<p class="muted">${esc(a.nome)}</p>${field('data', 'Data da posição de fechamento', 'date', yesterday(), `required max="${today()}"`)}${field('valor', 'Valor total da posição em reais', 'text', '', 'inputmode="decimal" required data-autofocus')}${field('observacao', 'Observação (opcional)', 'text', '', 'maxlength="500"')}<p class="field-note">Informe o total já incluindo os movimentos desse dia. Uma avaliação existente na mesma data será atualizada. A avaliação não entra como receita nem como aporte.</p>`, v => buildSnapshotRequest({ accountId: id, date: v.data, value: v.valor, observation: v.observacao || '' }, client));
 }
+async function openDebtRecognition(id) {
+  if (pendingGuard() || !client || state.busy || authConnecting || modalBusy) return;
+  if ($('#modal').open && !closeModal()) return;
+  const currentClient = client;
+  const read = request => currentClient.call(request);
+  state.busy = true; updateShell();
+  let preview;
+  try { preview = await loadDebtRecognition(read, id); }
+  finally { state.busy = false; updateShell(); }
+  if (currentClient !== client) return;
+  const body = `<p><strong>${esc(preview.account.nome)}</strong></p><p>As compras da fatura são anteriores ao saldo inicial do cartão e podem ter ficado fora da dívida cadastrada.</p><dl class="reconciliation-values"><div><dt>Faturas em aberto</dt><dd>${money(preview.total)}</dd></div><div><dt>Dívida já considerada</dt><dd>${money(preview.debt)}</dd></div><div><dt>Dívida a reconhecer</dt><dd>${money(preview.difference)}</dd></div></dl><details><summary>Faturas consideradas</summary><ul>${preview.pending.map(f => `<li>Vencimento ${dateLabel(f.data_vencimento)} · ${money(f.restante_centavos)}</li>`).join('')}</ul></details>${preview.payments.length ? notice(`Há ${preview.payments.length} pagamento(s) registrado(s) neste cartão sem vínculo com uma fatura. Confira-os antes de reconhecer outra dívida.`) + '<details><summary>Conferir pagamentos já registrados</summary><ul>' + preview.payments.map(p => `<li>${dateLabel(p.data_pagamento)} · ${money(p.valor_centavos)} · ${esc(p.descricao || 'Pagamento do cartão')}</li>`).join('') + '</ul></details>' : ''}${preview.available ? `<p class="field-note">Este passo registra um ajuste no saldo do cartão em ${dateLabel(preview.date)}. As despesas importadas são preservadas. O pagamento pela conta corrente será registrado em seguida, separadamente.</p><label class="checkbox-row"><input type="checkbox" name="debt_confirmed" required>Conferi no banco e ainda devo o total de ${money(preview.total)} das faturas listadas.</label>${preview.payments.length ? '<label class="checkbox-row"><input type="checkbox" name="payments_reviewed" required>Conferi os pagamentos acima e eles não quitam as faturas que estou reconhecendo.</label>' : ''}` : notice(preview.reason)}<p class="field-note">Se a fatura já foi paga, consulte os pagamentos existentes antes de reconhecer outra dívida.</p>`;
+  showModal('Reconhecer dívida da fatura importada', body, async values => {
+    if (currentClient !== client) throw new Error('A conexão mudou. Abra a conferência novamente.');
+    return buildDebtRecognitionRequest(preview, { confirmed: values.debt_confirmed === 'on', paymentsReviewed: values.payments_reviewed === 'on' }, read);
+  }, 'Reconhecer dívida não paga', 'Dívida reconhecida no cartão. Agora você pode registrar o pagamento da fatura.');
+  if (!preview.available) $('#modal-submit').hidden = true;
+}
 function openInvoice(ref) {
   const f = state.invoices.faturas.find(f => f.fatura_ref === ref);
+  if (!f) return;
+  if (f.exige_conciliacao) return openDebtRecognition(f.conta_id);
   showModal('Registrar pagamento da fatura', `<p>${esc(f.nome_cartao)} · vence ${dateLabel(f.data_vencimento)}</p><p class="muted">Saldo registrado: ${M(f.restante_centavos)}</p>${select('conta_id', 'Pagar pela conta', options(activeAccounts(operational)), 'required')}${field('valor', 'Valor pago em reais', 'text', amountInput(f.restante_centavos), 'required inputmode="decimal" data-autofocus')}${field('data', 'Data do pagamento', 'date', today(), `required max="${today()}"`)}<p class="field-note">Este pagamento reduz o saldo bancário e a dívida. As compras já entraram no orçamento e não serão somadas outra vez.</p>`, v => ({ acao: 'lancamentos.criar', dados: { tipo: 'transferencia', descricao: `Pagamento de fatura ${f.nome_cartao}`, conta_origem_id: v.conta_id, conta_destino_id: f.conta_id, forma_pagamento: 'transferencia', valor_centavos: parseMoney(v.valor), data_ocorrencia: v.data, data_pagamento: v.data, fatura_ref: ref } }), 'Registrar pagamento');
+  $('#modal-form').dataset.invoiceAccount = f.conta_id;
 }
 function openTxAction(kind, id) {
   const l = state.transactions.find(l => l.id === id);
@@ -395,6 +421,7 @@ async function handleAction(action, id) {
   if (!client || !state.initials) { toast('Conecte sua conta ou abra a demonstração primeiro.'); return; }
   if (action === 'retry') { if (state.pending) return runMutation(state.pending.request); return; }
   if (state.busy || authConnecting) return;
+  if (action === 'recognize-card-debt') return openDebtRecognition(id);
   if (action === 'history-month') return openHistoryMonth(id);
   if (action === 'more-pending') { state.pendingLimit += 10; render(); return; }
   if (action === 'reconcile-invoices') return setView('planning', { section: 'conferencia-faturas' });
@@ -467,7 +494,7 @@ $('#modal-form').addEventListener('submit', async event => {
       let request;
       try { request = await modalHandler(Object.fromEntries(new FormData(form))); }
       finally { modalBusy = false; $('#modal-submit').disabled = false; $('#modal-close').disabled = false; $('#modal-cancel').disabled = false; }
-      await runMutation(request);
+      await runMutation(request, modalSuccessMessage);
     }
   } catch (error) { showFormError(error); }
 });
